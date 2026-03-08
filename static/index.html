@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Adaptive RAG 数字人</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="app-body">
+  <div class="app-shell">
+    <aside class="sidebar-card">
+      <div class="brand-block">
+        <p class="eyebrow">Adaptive RAG Studio</p>
+        <h1>专业资料数字人</h1>
+        <p class="muted">上传后先自动生成资料类型、大标题和每段小标题。提问时先判断要不要检索，再按“类型 -> 资料 -> 小标题”逐层选择证据。</p>
+      </div>
+
+      <form id="upload-form" class="upload-card">
+        <label for="file-input" class="upload-title">上传资料 / 书籍</label>
+        <p class="muted small">系统会自动生成类型、大标题和分段小标题。</p>
+        <label class="filter-label">
+          <span>当前模型</span>
+          <select id="model-provider-select">
+            <option value="deepseek">DeepSeek</option>
+            <option value="qwen">Qwen</option>
+          </select>
+        </label>
+        <p id="model-status" class="muted small">上传和对话都会使用这里选择的模型。</p>
+        <input id="file-input" name="files" type="file" multiple accept=".txt,.md,.pdf,.docx" />
+        <button type="submit">加入知识库</button>
+        <p id="upload-status" class="status"></p>
+      </form>
+
+      <div class="section-title">
+        <span>资料概览</span>
+        <a class="ghost-link" href="/library">打开分段浏览器</a>
+      </div>
+      <div id="file-list" class="file-list fixed-scroll"></div>
+    </aside>
+
+    <main class="main-column">
+      <section class="stage-card fixed-card">
+        <div class="stage-copy">
+          <p class="eyebrow">Video Persona</p>
+          <h2>视频感数字人</h2>
+          <p id="avatar-caption" class="muted">待命中，准备接收文本或语音问题。</p>
+
+          <div class="voice-panel">
+            <button id="mic-button" type="button" class="primary-button">开启语音模式</button>
+            <label class="switch-row">
+              <input id="auto-send-toggle" type="checkbox" checked />
+              <span>语音结束后自动发送</span>
+            </label>
+            <p id="voice-status" class="muted small">开启后会持续聆听，停顿 2 秒自动判定一句结束，也可以直接打断数字人。</p>
+          </div>
+
+          <div class="stage-actions">
+            <a class="ghost-link" href="/library">查看资料详情页</a>
+            <div id="planner-badge" class="planner-badge">等待提问</div>
+          </div>
+        </div>
+
+        <div class="video-shell">
+          <div class="video-overlay top">LIVE KNOWLEDGE PERSONA</div>
+          <div class="video-overlay bottom">Lip Sync / Adaptive Retrieval / Voice Ready</div>
+          <div id="avatar" class="avatar mood-neutral state-idle viseme-rest" aria-label="视频感数字人">
+            <div class="cinema-glow glow-a"></div>
+            <div class="cinema-glow glow-b"></div>
+            <div class="scanlines"></div>
+            <svg viewBox="0 0 420 560" class="portrait" role="img" aria-hidden="true">
+              <defs>
+                <linearGradient id="skin" x1="0%" y1="0%" x2="0%" y2="100%">
+                  <stop offset="0%" stop-color="#f1d2c0" />
+                  <stop offset="100%" stop-color="#e0b79f" />
+                </linearGradient>
+                <linearGradient id="hair" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#2d2624" />
+                  <stop offset="100%" stop-color="#161111" />
+                </linearGradient>
+                <linearGradient id="dress" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stop-color="#8295bf" />
+                  <stop offset="100%" stop-color="#586781" />
+                </linearGradient>
+              </defs>
+
+              <ellipse cx="210" cy="514" rx="125" ry="20" class="shadow-shape"></ellipse>
+              <path class="dress" d="M112 522c18-122 57-168 98-168 41 0 79 46 98 168H112z"></path>
+              <path class="neck" d="M192 327h36v42h-36z"></path>
+              <path class="face-shape" d="M126 153c0-78 41-124 99-124 58 0 101 44 101 124v83c0 67-42 118-101 118-58 0-99-51-99-118v-83z"></path>
+              <path class="hair-back" d="M122 170c0-107 58-153 115-153 80 0 124 58 124 154 0 21-3 42-11 66l-22-30-15-112-62 26-91-14-24 52-17 51c-1-18 1-29 3-40z"></path>
+              <path class="hair-front" d="M146 98c25-35 58-52 101-52 72 0 115 50 115 136 0 10-1 20-2 31-15-18-29-31-43-41-23-16-45-24-75-26-38-2-70 2-113 22 6-28 10-46 17-70z"></path>
+              <g class="brows">
+                <path class="brow brow-left" d="M162 191c20-11 41-11 60-4"></path>
+                <path class="brow brow-right" d="M248 188c18-8 40-8 57 4"></path>
+              </g>
+              <g class="eyes">
+                <ellipse class="eye eye-left" cx="189" cy="218" rx="16" ry="10"></ellipse>
+                <ellipse class="eye eye-right" cx="276" cy="218" rx="16" ry="10"></ellipse>
+                <circle class="pupil pupil-left" cx="189" cy="219" r="5"></circle>
+                <circle class="pupil pupil-right" cx="276" cy="219" r="5"></circle>
+              </g>
+              <path class="nose" d="M232 228c3 17 4 30-5 43"></path>
+              <ellipse class="cheek cheek-left" cx="171" cy="262" rx="19" ry="9"></ellipse>
+              <ellipse class="cheek cheek-right" cx="294" cy="262" rx="19" ry="9"></ellipse>
+              <path class="mouth mouth-line" d="M201 295c18 17 42 17 60 0"></path>
+              <ellipse class="mouth-shape mouth-a" cx="231" cy="300" rx="16" ry="11"></ellipse>
+              <ellipse class="mouth-shape mouth-e" cx="231" cy="300" rx="21" ry="8"></ellipse>
+              <ellipse class="mouth-shape mouth-o" cx="231" cy="300" rx="11" ry="15"></ellipse>
+              <ellipse class="mouth-shape mouth-m" cx="231" cy="299" rx="19" ry="4"></ellipse>
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <section class="chat-card fixed-card">
+        <div id="messages" class="messages fixed-scroll">
+          <article class="message assistant">
+            <div class="bubble">
+              你好，现在主页只保留对话和资料概览。资料原文、类型、大标题和分段小标题都可以从“分段浏览器”独立页面查看。
+            </div>
+          </article>
+        </div>
+
+        <form id="chat-form" class="chat-form">
+          <textarea id="message-input" rows="4" placeholder="输入问题，或点击“开始语音”直接说话"></textarea>
+          <div class="chat-actions">
+            <div class="muted small">发送后会先让模型判断是否需要检索专业资料</div>
+            <button type="submit" class="primary-button">发送问题</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <template id="message-template">
+    <article class="message">
+      <div class="bubble"></div>
+      <div class="meta"></div>
+      <div class="sources"></div>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

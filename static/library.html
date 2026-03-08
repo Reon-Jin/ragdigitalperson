@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文献资料浏览器</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="app-body">
+  <div class="library-shell">
+    <aside class="library-filter-card fixed-card">
+      <div class="section-title">
+        <span>资料筛选</span>
+        <a class="ghost-link" href="/">返回主页</a>
+      </div>
+
+      <div class="filter-stack">
+        <label class="filter-label">
+          <span>原始文件名</span>
+          <input id="filename-filter" type="text" placeholder="按文件名筛选" />
+        </label>
+        <label class="filter-label">
+          <span>资料类型</span>
+          <select id="category-filter">
+            <option value="">全部类型</option>
+          </select>
+        </label>
+        <label class="filter-label">
+          <span>大标题</span>
+          <input id="title-filter" type="text" placeholder="按大标题筛选" />
+        </label>
+        <label class="filter-label">
+          <span>小标题</span>
+          <input id="chunk-filter" type="text" placeholder="按分段小标题筛选" />
+        </label>
+      </div>
+    </aside>
+
+    <section class="library-list-card fixed-card">
+      <div class="section-title">
+        <span>文献列表</span>
+      </div>
+      <div id="catalog-list" class="catalog-list fixed-scroll"></div>
+    </section>
+
+    <section class="library-detail-card fixed-card">
+      <div class="section-title">
+        <span>文献详情</span>
+      </div>
+      <div id="detail-view" class="detail-view fixed-scroll">
+        <div class="empty-state">
+          <strong>还没有选中文献</strong>
+          <p class="muted small">从左侧列表选择一篇文献后，这里会显示类别、原始文件名、大标题、大意概括、关键词和每个分段的小标题与正文内容。</p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/library.js"></script>
+</body>
+</html>
