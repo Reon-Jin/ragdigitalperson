@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   AgentMemory,
   AnalysisMode,
   AuthResponse,
@@ -38,8 +38,13 @@ async function parseJson<T>(response: Response): Promise<T> {
 }
 
 async function fetchAndParse<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
-  return parseJson<T>(response);
+  try {
+    const response = await fetch(input, init);
+    return parseJson<T>(response);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError("无法连接到服务，请确认后端已启动。", 0);
+  }
 }
 
 export function createApi(getToken: () => string, onUnauthorized: () => void) {
@@ -50,7 +55,12 @@ export function createApi(getToken: () => string, onUnauthorized: () => void) {
     if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
-    const response = await fetch(input, { ...init, headers });
+    let response: Response;
+    try {
+      response = await fetch(input, { ...init, headers });
+    } catch {
+      throw new ApiError("无法连接到服务，请确认后端已启动。", 0);
+    }
     if (response.status === 401) {
       onUnauthorized();
       throw new ApiError("请先登录", 401);
@@ -166,3 +176,4 @@ export function createApi(getToken: () => string, onUnauthorized: () => void) {
     },
   };
 }
+

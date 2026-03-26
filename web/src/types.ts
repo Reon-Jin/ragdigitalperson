@@ -1,4 +1,5 @@
-export type TaskType = "dashboard" | "auto" | "library";
+﻿export type TaskType = "dashboard" | "auto" | "library";
+export type DeskSource = "hybrid" | "market" | "knowledge";
 export type AnalysisMode = "summary" | "professional" | "teaching";
 export type ModelProvider = "deepseek" | "qwen" | "mimo" | "ollama";
 export type MessageRole = "user" | "assistant";
@@ -367,3 +368,4 @@ export type StreamEvent =
   | StreamCitationsEvent
   | StreamDeltaEvent
   | StreamFinalEvent;
+

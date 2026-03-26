@@ -1,6 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { TrendMiniChart } from "./components/TrendMiniChart";
+import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { createApi } from "./lib/api";
 import { formatTimeLabel, joinTags, num, pct, splitTags, toneClass, turnover } from "./lib/format";
@@ -10,6 +10,7 @@ import type {
   AgentMemory,
   AnalysisCard,
   AnalysisMode,
+  DeskSource,
   AuthUser,
   CitationItem,
   ConversationMessage,
@@ -35,7 +36,6 @@ import type {
   UserProfile,
 } from "./types";
 
-type DeskSource = "hybrid" | "market" | "knowledge";
 type ThemeMode = "dark" | "light";
 
 const MAX_HISTORY = 8;
@@ -336,6 +336,7 @@ export default function App() {
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
+  const tokenRef = useRef(token);
   const answerRef = useRef("");
   const assistantMessageIdRef = useRef("");
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
@@ -363,7 +364,11 @@ export default function App() {
     setSelectedLibraryDoc(null);
   }, []);
 
-  const api = useMemo(() => createApi(() => token, handleUnauthorized), [handleUnauthorized, token]);
+  const api = useMemo(() => createApi(() => tokenRef.current || window.localStorage.getItem(TOKEN_KEY) || "", handleUnauthorized), [handleUnauthorized]);
+
+  useEffect(() => {
+    tokenRef.current = token;
+  }, [token]);
 
   const setAgent = useCallback((stateName: "idle" | "loading" | "warn", title: string, caption: string) => {
     setAgentState(stateName);
@@ -545,6 +550,35 @@ export default function App() {
     }
   }, [api, securityQuery, setAgent]);
 
+  const uploadLibraryFiles = useCallback(async (files: FileList | File[]) => {
+    const uploadList = Array.from(files || []);
+    if (!uploadList.length) return;
+
+    const body = new FormData();
+    uploadList.forEach((file) => body.append("files", file));
+    body.append("model_provider", modelProvider || "deepseek");
+
+    setAgent("loading", "Queueing Research", "Upload accepted and queued for background ingestion.");
+    try {
+      const result = await api.upload(body);
+      const jobIds = result.items.map((item) => item.job_id);
+      if (result.items.length) {
+        setTask("library");
+        await refreshLibrary();
+        void pollIngestionJobs(jobIds);
+      }
+      const memorySnapshot = await api.memory();
+      setMemory(memorySnapshot);
+      if (!result.items.length && result.skipped.length) {
+        setAgent("warn", "Upload Skipped", `Skipped: ${result.skipped.join(" / ")}`);
+      } else {
+        setAgent("loading", "Ingestion Running", `Queued ${result.items.length} file(s) for background ingestion.`);
+      }
+    } catch (error) {
+      setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "Upload failed.");
+    }
+  }, [api, modelProvider, pollIngestionJobs, refreshLibrary, setAgent]);
+
   const uploadFiles = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -575,7 +609,7 @@ export default function App() {
     } catch (error) {
       setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "Upload failed.");
     }
-  }, [api, modelProvider, pollIngestionJobs, refreshLibrary, setAgent]);
+  }, [uploadLibraryFiles]);
 
   const saveProfile = useCallback(async () => {
     try {
@@ -864,9 +898,10 @@ export default function App() {
     setAuthError("");
     try {
       const payload = await api.login(username, password);
+      tokenRef.current = payload.token;
+      window.localStorage.setItem(TOKEN_KEY, payload.token);
       setToken(payload.token);
       setUser(payload.user);
-      window.localStorage.setItem(TOKEN_KEY, payload.token);
       setAgent("loading", "Initializing", "正在同步用户工作台。");
       await refreshCoreData();
       await initConversations();
@@ -883,9 +918,10 @@ export default function App() {
     setAuthError("");
     try {
       const payload = await api.register(username, password, displayName);
+      tokenRef.current = payload.token;
+      window.localStorage.setItem(TOKEN_KEY, payload.token);
       setToken(payload.token);
       setUser(payload.user);
-      window.localStorage.setItem(TOKEN_KEY, payload.token);
       setAgent("loading", "Bootstrapping", "正在创建专属金融工作台。");
       await refreshCoreData();
       await initConversations();
@@ -974,358 +1010,99 @@ export default function App() {
     return <AuthScreen mode={authMode} busy={authBusy} error={authError} onSwitch={setAuthMode} onLogin={handleLogin} onRegister={handleRegister} />;
   }
 
+  if (task === "library") {
+    return (
+      <LibraryWorkspace
+        files={libraryFiles}
+        search={librarySearch}
+        selectedDocumentId={selectedLibraryDocId}
+        selectedDocument={selectedLibraryDoc}
+        detailBusy={libraryDetailBusy}
+        deletingDocId={libraryDeletingDocId}
+        jobs={ingestionJobs}
+        profile={profile}
+        sessions={conversations}
+        activeConversationId={activeConversationId}
+        onSearchChange={setLibrarySearch}
+        onSelectDocument={(docId) => { void loadLibraryDocument(docId); }}
+        onRefresh={() => { void refreshLibrary(); }}
+        onDeleteDocument={(docId) => { void deleteLibraryDocument(docId); }}
+        onUploadFiles={(files) => { void uploadLibraryFiles(files); }}
+        onSaveProfile={() => { void saveProfile(); }}
+        onProfileChange={(patch) => setProfile((current) => ({ ...current, ...patch }))}
+        onOpenSession={(conversationId) => { void loadConversation(conversationId); }}
+        onAskQuestion={(prompt) => { setTask("dashboard"); void submitMessage(prompt); }}
+        onBackToDesk={() => setTask("dashboard")}
+        onLogout={() => { void logout(); }}
+      />
+    );
+  }
+
   return (
-    <div className="terminal-shell">
-      <div className="terminal-grid">
-        <aside className="sidebar-column">
-          <section className="panel brand-panel">
-            <div className="brand-lockup">
-              <div className="brand-mark">FA</div>
-              <div>
-                <p className="eyebrow">Bloomberg-grade Desk</p>
-                <h2>FinAvatar Terminal</h2>
-              </div>
-            </div>
-            <p className="muted-copy">Dark / Minimal / Professional / Data-driven / Premium</p>
-            <div className="desk-switch">
-              <button className={`switch-pill ${task !== "library" ? "active" : ""}`} type="button" onClick={() => setTask("dashboard")}>Desk</button>
-              <button className={`switch-pill ${task === "library" ? "active" : ""}`} type="button" onClick={() => setTask("library")}>Library</button>
-            </div>
-          </section>
-
-          <section className="panel control-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">Control Center</p><h3>参数控制</h3></div>
-              <StatusBadge state={agentState} />
-            </div>
-            <div className="form-grid">
-              <label className="field">
-                <span>模型选择</span>
-                <select value={modelProvider} onChange={(event) => setModelProvider(event.target.value)}>
-                  {(models.length ? models : [{ id: "deepseek", label: "DeepSeek" }]).map((item) => (
-                    <option key={item.id} value={item.id}>{item.label}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>分析模式</span>
-                <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
-                  <option value="professional">Professional</option>
-                  <option value="summary">Summary</option>
-                  <option value="teaching">Teaching</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>数据源</span>
-                <select value={deskSource} onChange={(event) => setDeskSource(event.target.value as DeskSource)}>
-                  <option value="hybrid">Hybrid</option>
-                  <option value="market">Market</option>
-                  <option value="knowledge">Knowledge</option>
-                </select>
-              </label>
-            </div>
-            <p className="control-caption">{controlHint}</p>
-          </section>
-
-          <section className="panel profile-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">Investor Lens</p><h3>风险画像</h3></div>
-              <button className="button ghost" type="button" onClick={() => void saveProfile()}>保存</button>
-            </div>
-            <div className="form-grid compact-grid">
-              <label className="field">
-                <span>风险等级</span>
-                <select value={profile.risk_level} onChange={(event) => setProfile((current) => ({ ...current, risk_level: event.target.value as UserProfile["risk_level"] }))}>
-                  <option value="low">低风险</option>
-                  <option value="medium">中风险</option>
-                  <option value="high">高风险</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>投资期限</span>
-                <select value={profile.investment_horizon} onChange={(event) => setProfile((current) => ({ ...current, investment_horizon: event.target.value as UserProfile["investment_horizon"] }))}>
-                  <option value="short">短期</option>
-                  <option value="medium">中期</option>
-                  <option value="long">长期</option>
-                </select>
-              </label>
-              <label className="field full-span"><span>关注市场</span><input value={joinTags(profile.markets)} onChange={(event) => setProfile((current) => ({ ...current, markets: splitTags(event.target.value) }))} /></label>
-              <label className="field full-span"><span>偏好赛道</span><input value={joinTags(profile.sector_preferences)} onChange={(event) => setProfile((current) => ({ ...current, sector_preferences: splitTags(event.target.value) }))} /></label>
-            </div>
-          </section>
-
-          <section className="panel ingest-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">Private Research</p><h3>资料注入</h3></div>
-              <span className="tv-tag">{libraryCount} docs</span>
-            </div>
-            <form className="form-grid" onSubmit={(event) => void uploadFiles(event)}>
-              <label className="field"><span>上传资料</span><input type="file" name="files" multiple accept=".txt,.md,.pdf,.docx,.csv,.json,.html,.htm,.xlsx" /></label>
-              <div className="button-row">
-                <button className="button primary" type="submit">写入知识库</button>
-                <button className="button secondary" type="button" onClick={() => setTask("library")}>打开资料库</button>
-              </div>
-            </form>
-          </section>
-
-          <section className="panel user-panel">
-            <div className="user-chip">
-              <div className="mini-avatar">{initialsOf(avatarProfile?.display_name || user.display_name || user.username)}</div>
-              <div className="user-chip-meta">
-                <strong>{avatarProfile?.display_name || user.display_name || user.username}</strong>
-                <span>{agentState === "loading" ? "分析中" : agentState === "warn" ? "需要注意" : "在线"}</span>
-              </div>
-              <button className="voice-toggle" type="button" onClick={() => setAvatarVoiceEnabled((current) => !current)}>{avatarVoiceEnabled ? "Voice On" : "Voice Off"}</button>
-            </div>
-          </section>
-        </aside>
-
-        <main className="main-column">
-          {task === "library" ? (
-            <LibraryWorkspace
-              files={libraryFiles}
-              search={librarySearch}
-              selectedDocumentId={selectedLibraryDocId}
-              selectedDocument={selectedLibraryDoc}
-              detailBusy={libraryDetailBusy}
-              deletingDocId={libraryDeletingDocId}
-              jobs={ingestionJobs}
-              onSearchChange={setLibrarySearch}
-              onSelectDocument={(docId) => { void loadLibraryDocument(docId); }}
-              onRefresh={() => { void refreshLibrary(); }}
-              onDeleteDocument={(docId) => { void deleteLibraryDocument(docId); }}
-            />
-          ) : (
-            <>
-              <section className="panel asset-panel">
-                <div className="asset-panel-top">
-                  <div>
-                    <p className="eyebrow">Asset Focus</p>
-                    <h2>{displayedSecurityName}</h2>
-                    <div className="asset-meta-row">
-                      <span className="tv-tag strong">{displayedTicker}</span>
-                      <span className="tv-tag">{MODE_LABELS[analysisMode]}</span>
-                      <span className="tv-tag">{SOURCE_LABELS[deskSource]}</span>
-                    </div>
-                  </div>
-                  <div className="asset-search-row">
-                    <input className="hero-search" value={securityQuery} onChange={(event) => setSecurityQuery(event.target.value)} placeholder="输入股票名称或代码，例如：600519 / 贵州茅台" />
-                    <button className="button primary" type="button" onClick={() => void queryStock(securityQuery)} disabled={securityBusy}>{securityBusy ? "加载中..." : "查询"}</button>
-                  </div>
-                </div>
-
-                <div className="asset-panel-body">
-                  <div className="price-cluster">
-                    {securityBusy && !security ? (
-                      <>
-                        <SkeletonBlock className="skeleton-price" />
-                        <SkeletonBlock className="skeleton-line short" />
-                      </>
-                    ) : (
-                      <>
-                        <strong className={`asset-price ${toneClass(displayedChange)}`}>{num(displayedPrice)}</strong>
-                        <span className={`asset-change ${toneClass(displayedChange)}`}>{pct(displayedChange)}</span>
-                        <small>Route: {routeBadge}</small>
-                      </>
-                    )}
-                  </div>
-                  <div className="sparkline-panel">
-                    {securityBusy && !sparkValues.length ? <SkeletonBlock className="skeleton-chart" /> : <TrendMiniChart values={sparkValues} tone={Number(displayedChange) >= 0 ? "rise" : "fall"} />}
-                  </div>
-                </div>
-
-                <div className="market-ribbon">
-                  {(dashboard?.indices || []).slice(0, 4).map((item) => (
-                    <article className="market-chip" key={item.name}>
-                      <span>{item.name}</span>
-                      <strong>{num(item.last_price)}</strong>
-                      <em className={toneClass(item.change_percent)}>{pct(item.change_percent)}</em>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
-              <section className="analysis-grid">
-                <article className="panel analysis-panel">
-                  <div className="section-head">
-                    <div><p className="eyebrow">AI Investment Analysis</p><h3>{displayedSummaryTitle}</h3></div>
-                    <span className="analysis-mode-tag">{MODE_LABELS[analysisMode]}</span>
-                  </div>
-
-                  <div className="conclusion-card">
-                    <span className="eyebrow">Conclusion</span>
-                    <p>{displayedSummaryText}</p>
-                  </div>
-
-                  <div className="analysis-bullets">
-                    {displayedBullets.length ? displayedBullets.map((item) => (
-                      <div className="bullet-row" key={item}><i /><span>{item}</span></div>
-                    )) : <div className="empty-state">等待新的结构化结论。</div>}
-                  </div>
-
-                  <div className="insight-metric-grid">
-                    <InsightMetric label="当前价格" value={num(security?.quote?.last_price)} tone={toneClass(security?.quote?.change_percent)} note={pct(security?.quote?.change_percent)} />
-                    <InsightMetric label="PE / PB" value={`${num(security?.profile?.pe)} / ${num(security?.profile?.pb)}`} note={security?.profile?.sector || "Valuation"} />
-                    <InsightMetric label="ROE" value={pct(security?.profile?.roe)} note={security?.profile?.industry || "Profitability"} />
-                    <InsightMetric label="主力资金" value={turnover(security?.capital_flow?.main_net_inflow)} note={security?.capital_flow?.trend_label || "Capital Flow"} />
-                    <InsightMetric label="市场风格" value={dashboard?.market_sentiment?.regime || "--"} note="Market Regime" />
-                    <InsightMetric label="证据覆盖" value={`${citations.length || 0}`} note="Citations" />
-                  </div>
-
-                  <div className="progress-grid">
-                    <ProgressMeter label="RSI" value={rsiScore} note={`RSI14 ${num(security?.technical?.rsi14)}`} tone="positive" />
-                    <ProgressMeter label="Risk Score" value={riskScore} note="基于波动、振幅与债务结构估算" tone="risk" />
-                    <ProgressMeter label="Liquidity" value={liquidityScore} note="成交额与换手率强度" tone="positive" />
-                    <ProgressMeter label="Confidence" value={confidenceScore} note="结构化卡片与证据覆盖度" tone="neutral" />
-                  </div>
-
-                  <div className="risk-card">
-                    <div className="section-head tight"><div><p className="eyebrow">Risk Alert</p><h4>风险提示</h4></div></div>
-                    <div className="risk-list">
-                      {displayedRisks.length ? displayedRisks.map((item) => (
-                        <div className="risk-row" key={item}><i /><span>{item}</span></div>
-                      )) : <div className="empty-state">暂无风险提示。</div>}
-                    </div>
-                  </div>
-                </article>
-
-                <article className="panel context-panel">
-                  <div className="section-head">
-                    <div><p className="eyebrow">Market Context</p><h3>辅助信息</h3></div>
-                    <button className="button ghost" type="button" onClick={() => void refreshCoreData()}>刷新</button>
-                  </div>
-
-                  <TagCluster title="TradingView-style Tags" items={keyTags} emptyLabel="等待标签" />
-
-                  <div className="context-block">
-                    <div className="section-head tight"><h4>Reference Flow</h4></div>
-                    <div className="reference-list">
-                      {referenceItems.length ? referenceItems.map((item) => (
-                        <article className="reference-card" key={`${item.title}-${item.meta}`}>
-                          <strong>{item.title}</strong>
-                          <p>{item.summary}</p>
-                          <small>{item.meta}</small>
-                        </article>
-                      )) : <div className="empty-state">暂无辅助引用。</div>}
-                    </div>
-                  </div>
-
-                  <div className="context-block">
-                    <div className="section-head tight"><h4>Market Breadth</h4></div>
-                    <div className="breadth-list">
-                      {(dashboard?.top_gainers || []).slice(0, 4).map((item, index) => (
-                        <button className="breadth-row" key={`${String(item.symbol || item.name || index)}`} type="button" onClick={() => void queryStock(String(item.symbol || item.name || ""))}>
-                          <span>{String(item.name || item.symbol || "--")}</span>
-                          <strong className={toneClass(Number(item.change_percent ?? item.daily_change ?? 0))}>{pct(Number(item.change_percent ?? item.daily_change ?? 0))}</strong>
-                        </button>
-                      ))}
-                      {!dashboard?.top_gainers?.length ? <div className="empty-state">暂无盘面热度数据。</div> : null}
-                    </div>
-                  </div>
-                </article>
-              </section>
-
-              <section className="panel chat-panel">
-                <div className="section-head">
-                  <div><p className="eyebrow">Conversation</p><h3>{conversationTitle}</h3></div>
-                  <div className="button-row">
-                    <button className="button secondary" type="button" onClick={() => void createConversation(true)}>新会话</button>
-                    <button className="button ghost" type="button" onClick={() => void removeConversation()}>删除</button>
-                  </div>
-                </div>
-
-                <div className="quick-prompt-row">
-                  {QUICK_PROMPTS.map((prompt) => (
-                    <button className="prompt-chip" key={prompt} type="button" onClick={() => void submitMessage(prompt)}>{prompt}</button>
-                  ))}
-                </div>
-
-                <div className="message-stream terminal-messages" ref={messageStreamRef}>
-                  {messages.length ? messages.map((message) => (
-                    <article key={message.message_id} className={`message-card ${message.role}`}>
-                      <div className="message-meta"><span>{message.role === "user" ? "USER" : "FINAVATAR"}</span><small>{formatTimeLabel(message.created_at)}</small></div>
-                      <MarkdownBlock text={message.content || (message.role === "assistant" ? "正在生成..." : "")} />
-                    </article>
-                  )) : <div className="empty-state">从这里开始新的投研对话，系统会保留上下文并实时流式输出。</div>}
-                </div>
-
-                <form className="composer-row" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
-                  <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：围绕当前关注标的，给我一份偏专业风格的买卖观察和风险提示。" rows={4} />
-                  <div className="button-row align-end">
-                    <button className="button ghost" type="button" onClick={() => controllerRef.current?.abort()} disabled={!streaming}>停止</button>
-                    <button className="button primary" type="submit" disabled={streaming}>{streaming ? "分析中..." : "发送分析"}</button>
-                  </div>
-                </form>
-              </section>
-            </>
-          )}
-        </main>
-
-        <aside className="right-column">
-          <section className="panel side-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">Session History</p><h3>会话历史</h3></div>
-              <button className="button ghost small" type="button" onClick={() => setHistoryCollapsed((current) => !current)}>{historyCollapsed ? "展开" : "折叠"}</button>
-            </div>
-            {!historyCollapsed ? (
-              <div className="history-list">
-                {conversations.length ? conversations.map((item) => (
-                  <button className={`conversation-item ${item.conversation_id === activeConversationId ? "active" : ""}`} key={item.conversation_id} type="button" onClick={() => void loadConversation(item.conversation_id)}>
-                    <strong>{item.title || "新会话"}</strong>
-                    <p>{item.last_message_preview || "暂无消息"}</p>
-                    <span>{item.message_count || 0} 条消息</span>
-                  </button>
-                )) : <div className="empty-state">暂无历史会话。</div>}
-              </div>
-            ) : null}
-          </section>
-
-          <section className="panel side-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">AI Memory</p><h3>记忆标签</h3></div>
-              <span className="tv-tag">{formatTimeLabel(memory.updated_at)}</span>
-            </div>
-            <p className="muted-copy">{memory.summary}</p>
-            <TagCluster title="Memory Tags" items={historyTags} emptyLabel="等待记忆沉淀" />
-          </section>
-
-          <section className="panel side-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">System Status</p><h3>系统状态</h3></div>
-              <span className="tv-tag strong">{okProviders}/{health?.providers?.length || 0} providers</span>
-            </div>
-
-            <div className="status-icon-grid">
-              <article className="status-icon-card"><span className="status-icon">MD</span><strong>{SOURCE_LABELS[deskSource]}</strong><small>当前数据源焦点</small></article>
-              <article className="status-icon-card"><span className="status-icon">RT</span><strong>{streaming ? "Streaming" : "Standby"}</strong><small>会话流状态</small></article>
-              <article className="status-icon-card"><span className="status-icon">KB</span><strong>{libraryCount}</strong><small>知识库文档</small></article>
-            </div>
-
-            <div className="provider-stack">
-              {(health?.providers || []).length ? health?.providers.map((item) => (
-                <div className={`provider-card ${item.ok ? "ok" : "fail"}`} key={item.provider}>
-                  <div className="provider-head"><strong>{item.provider}</strong><span>{item.ok ? "OK" : "WARN"}</span></div>
-                  <small>Latency {item.latency_ms ?? "--"} ms</small>
-                  {item.error ? <p>{item.error}</p> : null}
-                </div>
-              )) : <div className="empty-state">暂无 provider 健康数据。</div>}
-            </div>
-
-            <div className="trace-block">
-              <div className="section-head tight"><h4>Execution Trace</h4></div>
-              <div className="trace-list">
-                {statusItems.map((item, index) => (
-                  <div className="trace-row" key={`${item}-${index}`}><i /><span>{item}</span></div>
-                ))}
-              </div>
-            </div>
-            <div className="button-row">
-              <button className="button secondary" type="button" onClick={() => void refreshCoreData()}>刷新系统</button>
-              <button className="button ghost" type="button" onClick={() => void logout()}>退出</button>
-            </div>
-          </section>
-        </aside>
-      </div>
-    </div>
+    <DashboardWorkspace
+      profile={profile}
+      models={models}
+      modelProvider={modelProvider}
+      analysisMode={analysisMode}
+      deskSource={deskSource}
+      controlHint={controlHint}
+      securityQuery={securityQuery}
+      securityBusy={securityBusy}
+      dashboard={dashboard}
+      security={security}
+      displayedSecurityName={displayedSecurityName}
+      displayedTicker={displayedTicker}
+      displayedPrice={displayedPrice}
+      displayedChange={displayedChange}
+      routeBadge={routeBadge}
+      sparkValues={sparkValues}
+      displayedSummaryTitle={displayedSummaryTitle}
+      displayedSummaryText={displayedSummaryText}
+      displayedBullets={displayedBullets}
+      displayedRisks={displayedRisks}
+      keyTags={keyTags}
+      referenceItems={referenceItems}
+      rsiScore={Number(security?.technical?.rsi14 || 0)}
+      riskScore={computeRiskScore(security)}
+      liquidityScore={computeLiquidityScore(security)}
+      confidenceScore={computeConfidenceScore(cards, citations, security)}
+      citationsCount={citations.length}
+      conversationTitle={conversationTitle}
+      messages={messages}
+      draft={draft}
+      streaming={streaming}
+      quickPrompts={QUICK_PROMPTS}
+      conversations={conversations}
+      activeConversationId={activeConversationId}
+      memorySummary={memory.summary}
+      memoryTags={historyTags}
+      health={health}
+      okProviders={okProviders}
+      statusItems={statusItems}
+      userDisplayName={avatarProfile?.display_name || user.display_name || user.username}
+      avatarVoiceEnabled={avatarVoiceEnabled}
+      uploadQueuedCount={ingestionJobs.filter((item) => !["completed", "failed"].includes(item.status)).length}
+      onProfileChange={(patch) => setProfile((current) => ({ ...current, ...patch }))}
+      onSaveProfile={() => { void saveProfile(); }}
+      onUploadFiles={(files) => { void uploadLibraryFiles(files); }}
+      onLogout={() => { void logout(); }}
+      onGoLibrary={() => setTask("library")}
+      onGoDesk={() => setTask("dashboard")}
+      onOpenSession={(conversationId) => { void loadConversation(conversationId); }}
+      onRefreshCoreData={() => { void refreshCoreData(); }}
+      onSecurityQueryChange={setSecurityQuery}
+      onQueryStock={(value) => { void queryStock(value || securityQuery); }}
+      onDraftChange={setDraft}
+      onSubmitMessage={(prompt) => { void submitMessage(prompt); }}
+      onCreateConversation={() => { void createConversation(); }}
+      onRemoveConversation={() => { void removeConversation(); }}
+      onAbortStream={() => controllerRef.current?.abort()}
+      onToggleVoice={() => setAvatarVoiceEnabled((current) => !current)}
+      onModelProviderChange={setModelProvider}
+      onAnalysisModeChange={setAnalysisMode}
+      onDeskSourceChange={setDeskSource}
+    />
   );
 }
+
+

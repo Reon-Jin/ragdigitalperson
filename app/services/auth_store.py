@@ -31,11 +31,31 @@ class AuthStore:
 
         with self._lock:
             existing = self.db.fetchone(
-                "SELECT user_id FROM users WHERE lower(username) = lower(%(username)s)",
+                "SELECT user_id, username, display_name, created_at, last_login_at FROM users WHERE lower(username) = lower(%(username)s)",
                 {"username": normalized_username},
             )
             if existing:
-                raise ValueError("用户名已存在")
+                now = self._now()
+                updated_record = {
+                    "user_id": existing["user_id"],
+                    "display_name": normalized_display_name,
+                    "password_hash": self._hash_password(password),
+                    "last_login_at": now,
+                }
+                self.db.execute(
+                    """
+                    UPDATE users
+                    SET display_name = %(display_name)s,
+                        password_hash = %(password_hash)s,
+                        last_login_at = %(last_login_at)s
+                    WHERE user_id = %(user_id)s
+                    """,
+                    updated_record,
+                )
+                token = self._create_session_unlocked(existing["user_id"])
+                existing["display_name"] = normalized_display_name
+                existing["last_login_at"] = now
+                return self._to_auth_user(existing), token
 
             user_id = uuid.uuid4().hex[:12]
             now = self._now()

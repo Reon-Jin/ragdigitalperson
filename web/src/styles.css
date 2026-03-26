@@ -1,3 +1,5 @@
+﻿@import "tailwindcss";
+
 :root {
   --bg: #08121f;
   --bg-soft: #0f1d2e;
@@ -2150,3 +2152,4 @@ textarea {
     max-height: 420px;
   }
 }
+

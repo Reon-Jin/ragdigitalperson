@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 V2TaskType = Literal[
@@ -140,14 +140,34 @@ class AuthUser(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=40)
-    password: str = Field(min_length=6, max_length=120)
-    display_name: str | None = Field(default=None, max_length=40)
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    username: str = Field(default="", max_length=40)
+    password: str = Field(default="", max_length=120)
+    display_name: str | None = Field(
+        default=None,
+        max_length=40,
+        validation_alias=AliasChoices("display_name", "displayName"),
+    )
+
+    @field_validator("username", "display_name", mode="before")
+    @classmethod
+    def normalize_string(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=40)
-    password: str = Field(min_length=6, max_length=120)
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    username: str = Field(default="", max_length=40)
+    password: str = Field(default="", max_length=120)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def normalize_string(cls, value: str | None) -> str:
+        return str(value or "").strip()
 
 
 class AuthResponse(BaseModel):

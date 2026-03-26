@@ -1,107 +1,19 @@
-﻿import { useDeferredValue, useEffect, useMemo, useState } from "react";
+﻿import { startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import { formatTimeLabel } from "../lib/format";
-import type { ChunkDetail, DocumentDetail, IngestionJob, LibraryFileItem, PageDetail } from "../types";
+import type { ConversationSummary, DocumentDetail, IngestionJob, LibraryFileItem, SearchResultItem, UserProfile } from "../types";
+import { DocumentMetaBar } from "./library/DocumentMetaBar";
+import { DocumentTabs, type LibraryTabKey } from "./library/DocumentTabs";
+import { mockDocument, mockFiles, mockHits, mockJobs, mockSessions } from "./library/mockData";
+import { RightInsightPanel } from "./library/RightInsightPanel";
+import { SessionDrawer } from "./library/SessionDrawer";
+import { Sidebar } from "./library/Sidebar";
+import { TopHeader } from "./library/TopHeader";
 
-type LibraryTab = "preview" | "chunks" | "pages";
-
-function formatPageRange(start?: number | null, end?: number | null): string {
-  if (start == null && end == null) return "未定位页码";
-  if ((start ?? null) === (end ?? null)) return `P.${start}`;
-  return `P.${start ?? "?"}-${end ?? "?"}`;
-}
-
-function suffixLabel(suffix: string): string {
-  const cleaned = String(suffix || "").replace(/^\./, "").trim();
-  return cleaned ? cleaned.toUpperCase() : "FILE";
-}
-
-function excerpt(text: string, limit = 1600): string {
-  const cleaned = String(text || "").trim();
-  if (cleaned.length <= limit) return cleaned;
-  return `${cleaned.slice(0, limit).trimEnd()}...`;
-}
-
-function previewExcerpt(document: DocumentDetail): string {
-  const pageText = document.pages.find((item) => item.text.trim())?.text || "";
-  if (pageText.trim()) return excerpt(pageText);
-  const chunkText = document.chunks.find((item) => item.text.trim())?.text || "";
-  if (chunkText.trim()) return excerpt(chunkText);
-  return document.summary || "暂无可预览文本。";
-}
-
-function resolveDocumentJob(jobs: IngestionJob[], docId: string): IngestionJob | null {
-  const related = jobs.filter((item) => item.doc_id === docId);
-  if (!related.length) return null;
-  return related.sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
-}
-
-function statusPresentation(item: LibraryFileItem, job: IngestionJob | null): { label: string; className: string } {
-  const status = String(item.status || "").toLowerCase();
-  if (status === "completed") {
-    return { label: "已完成", className: "status-good" };
-  }
-  if (status === "failed") {
-    return { label: "失败 100%", className: "status-warn" };
-  }
-  if (job && ["queued", "running"].includes(job.status)) {
-    const progress = Math.round((job.progress || 0) * 100);
-    return { label: `${job.stage} ${progress}%`, className: "status-loading" };
-  }
-  if (status === "processing" || status === "queued") {
-    const progress = job ? Math.round((job.progress || 0) * 100) : 0;
-    const stage = job?.stage || status;
-    return { label: `${stage} ${progress}%`, className: "status-loading" };
-  }
-  return { label: suffixLabel(item.suffix), className: "status-neutral" };
-}
-
-function PageViewer({ page }: { page: PageDetail | null }) {
-  if (!page) {
-    return <div className="empty-state">当前资料没有可分页预览的内容。</div>;
-  }
-  return (
-    <div className="library-active-view">
-      <div className="card-topline">
-        <strong>第 {page.page_number} 页</strong>
-        <span className="status-pill status-neutral">{page.chunks.length} 个分块命中</span>
-      </div>
-      <p className="muted-copy">{page.preview || "暂无页面摘要。"}</p>
-      <pre className="library-text-preview">{page.text || "当前页暂无可提取文本。"}</pre>
-      <div className="library-chip-stack">
-        {page.chunks.length ? (
-          page.chunks.map((chunk) => (
-            <span className="status-pill status-neutral" key={chunk.chunk_id}>
-              {chunk.chunk_title} · {formatPageRange(chunk.page_start, chunk.page_end)}
-            </span>
-          ))
-        ) : (
-          <span className="status-pill status-neutral">这一页未匹配到分块。</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ChunkViewer({ chunk }: { chunk: ChunkDetail | null }) {
-  if (!chunk) {
-    return <div className="empty-state">当前资料没有可查看的分块。</div>;
-  }
-  return (
-    <div className="library-active-view">
-      <div className="card-topline">
-        <strong>{chunk.chunk_title}</strong>
-        <span className="status-pill status-neutral">{chunk.word_count} tokens</span>
-      </div>
-      <div className="pill-row compact">
-        <span className="status-pill status-neutral">{chunk.section_title || "未分类"}</span>
-        <span className="status-pill status-neutral">{chunk.chunk_kind}</span>
-        <span className="status-pill status-neutral">{formatPageRange(chunk.page_start, chunk.page_end)}</span>
-      </div>
-      <p className="muted-copy">{chunk.preview || "暂无摘要。"}</p>
-      <pre className="library-text-preview">{chunk.text || "暂无正文。"}</pre>
-    </div>
-  );
+function resolveJob(jobs: IngestionJob[], docId: string): IngestionJob | null {
+  const matches = jobs.filter((item) => item.doc_id === docId);
+  if (!matches.length) return null;
+  return matches.sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
 }
 
 export function LibraryWorkspace(props: {
@@ -112,358 +24,233 @@ export function LibraryWorkspace(props: {
   detailBusy: boolean;
   deletingDocId: string;
   jobs: IngestionJob[];
+  profile: UserProfile;
+  sessions: ConversationSummary[];
+  activeConversationId: string;
   onSearchChange: (value: string) => void;
   onSelectDocument: (docId: string) => void;
   onRefresh: () => void;
   onDeleteDocument: (docId: string) => void;
+  onUploadFiles: (files: FileList | File[]) => void;
+  onSaveProfile: () => void;
+  onProfileChange: (patch: Partial<UserProfile>) => void;
+  onOpenSession: (conversationId: string) => void;
+  onAskQuestion: (prompt: string) => void;
+  onBackToDesk: () => void;
+  onLogout: () => void;
 }) {
-  const deferredSearch = useDeferredValue(props.search);
-  const [activeTab, setActiveTab] = useState<LibraryTab>("preview");
-  const [activeChunkId, setActiveChunkId] = useState("");
-  const [activePageNumber, setActivePageNumber] = useState(1);
-  const [showAllSections, setShowAllSections] = useState(false);
+  const [activeTab, setActiveTab] = useState<LibraryTabKey>("summary");
+  const [selectedChunkId, setSelectedChunkId] = useState("");
+  const [selectedPageNumber, setSelectedPageNumber] = useState(1);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [sessionOpen, setSessionOpen] = useState(false);
 
-  const jobsByDocId = useMemo(() => {
-    const map = new Map<string, IngestionJob>();
-    props.files.forEach((item) => {
-      const job = resolveDocumentJob(props.jobs, item.doc_id);
-      if (job) map.set(item.doc_id, job);
-    });
-    return map;
-  }, [props.files, props.jobs]);
+  const deferredSearch = useDeferredValue(props.search);
+  const usingMockData = !props.files.length;
+  const displayFiles = usingMockData ? mockFiles : props.files;
+  const displayJobs = usingMockData ? mockJobs : props.jobs;
+  const displaySessions = props.sessions.length ? props.sessions : mockSessions;
 
   const filteredFiles = useMemo(() => {
     const keyword = deferredSearch.trim().toLowerCase();
-    if (!keyword) return props.files;
-    return props.files.filter((item) => {
-      const haystack = [item.title, item.filename, item.summary, item.category, ...(item.keywords || [])].join("\n").toLowerCase();
-      return haystack.includes(keyword);
-    });
-  }, [deferredSearch, props.files]);
+    if (!keyword) return displayFiles;
+    return displayFiles.filter((item) =>
+      [item.title, item.filename, item.summary, item.category, ...(item.keywords || [])].join("\n").toLowerCase().includes(keyword),
+    );
+  }, [deferredSearch, displayFiles]);
+
+  const displayDocument = useMemo(() => {
+    if (usingMockData) return mockDocument;
+    if (props.selectedDocument) return props.selectedDocument;
+    return null;
+  }, [props.selectedDocument, usingMockData]);
+
+  const activeJob = displayDocument ? resolveJob(displayJobs, displayDocument.doc_id) : null;
+  const displayHits: SearchResultItem[] = usingMockData ? mockHits : mockHits;
 
   useEffect(() => {
-    const document = props.selectedDocument;
-    setShowAllSections(false);
-    if (!document) {
-      setActiveChunkId("");
-      setActivePageNumber(1);
+    if (!displayDocument) {
+      setSelectedChunkId("");
+      setSelectedPageNumber(1);
       return;
     }
-    setActiveChunkId((current) => {
-      if (current && document.chunks.some((item) => item.chunk_id === current)) return current;
-      return document.chunks[0]?.chunk_id || "";
-    });
-    setActivePageNumber((current) => {
-      if (document.pages.some((item) => item.page_number === current)) return current;
-      return document.pages[0]?.page_number || 1;
-    });
-  }, [props.selectedDocument]);
+    setSelectedChunkId((current) => current || displayDocument.chunks[0]?.chunk_id || "");
+    setSelectedPageNumber((current) => current || displayDocument.pages[0]?.page_number || 1);
+  }, [displayDocument]);
 
-  const activeChunk = useMemo(() => {
-    if (!props.selectedDocument) return null;
-    return props.selectedDocument.chunks.find((item) => item.chunk_id === activeChunkId) || props.selectedDocument.chunks[0] || null;
-  }, [activeChunkId, props.selectedDocument]);
+  const statusTone = displayDocument?.status === "failed" ? "error" : activeJob ? "processing" : "success";
+  const statusLabel =
+    displayDocument?.status === "failed"
+      ? "解析失败"
+      : activeJob
+        ? `${activeJob.stage} ${Math.round((activeJob.progress || 0) * 100)}%`
+        : "索引完成";
 
-  const activePage = useMemo(() => {
-    if (!props.selectedDocument) return null;
-    return props.selectedDocument.pages.find((item) => item.page_number === activePageNumber) || props.selectedDocument.pages[0] || null;
-  }, [activePageNumber, props.selectedDocument]);
-
-  const visibleSections = useMemo(() => {
-    const sections = props.selectedDocument?.sections || [];
-    return showAllSections ? sections : sections.slice(0, 12);
-  }, [props.selectedDocument, showAllSections]);
-
-  const activeJob = props.selectedDocument ? jobsByDocId.get(props.selectedDocument.doc_id) || null : null;
-  const activeStatus = props.selectedDocument
-    ? statusPresentation(props.selectedDocument, activeJob)
-    : { label: "", className: "status-neutral" };
+  const metrics = useMemo(
+    () => [
+      {
+        label: "阅读规模",
+        value: `${displayDocument?.pages.length || 0} 页`,
+        note: "原始页码",
+      },
+      {
+        label: "结构化章节",
+        value: `${displayDocument?.section_count || 0}`,
+        note: "已形成目录",
+      },
+      {
+        label: "检索单元",
+        value: `${displayDocument?.chunk_count || 0}`,
+        note: "可用于问答",
+      },
+      {
+        label: "更新时点",
+        value: displayDocument ? formatTimeLabel(displayDocument.uploaded_at) : "--",
+        note: "最近入库",
+      },
+      {
+        label: "索引状态",
+        value: activeJob ? "处理中" : displayDocument ? "可检索" : "待选择",
+        note: activeJob ? activeJob.message || "后台处理" : "可发起分析",
+      },
+    ],
+    [activeJob, displayDocument],
+  );
 
   return (
-    <section className="panel library-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="section-kicker">Knowledge Base Manager</p>
-          <h2>资料管理</h2>
-          <p className="muted-copy">集中查看你的私有资料，预览正文，核对分块与清理无效文档。</p>
-        </div>
-        <div className="toolbar-row library-toolbar">
-          <label className="field library-search-wrap">
-            <span>搜索资料</span>
-            <input value={props.search} onChange={(event) => props.onSearchChange(event.target.value)} placeholder="按标题、文件名、关键词搜索" />
-          </label>
-          <button className="button secondary" type="button" onClick={props.onRefresh}>
-            刷新资料
-          </button>
-        </div>
-      </div>
+    <>
+      <div className="min-h-screen bg-[#071017] text-slate-100">
+        <div className="grid min-h-screen grid-cols-[248px_minmax(0,1fr)_320px]">
+          <Sidebar
+            profile={props.profile}
+            activeKey="library"
+            onSaveProfile={props.onSaveProfile}
+            onBackToDesk={props.onBackToDesk}
+            onOpenSessions={() => setSessionOpen(true)}
+            onLogout={props.onLogout}
+            onProfileChange={props.onProfileChange}
+            onUploadFiles={props.onUploadFiles}
+            uploading={Boolean(activeJob)}
+            queuedCount={displayJobs.filter((item) => !["completed", "failed"].includes(item.status)).length}
+          />
 
-      <div className="library-layout">
-        <div className="library-list-column">
-          <div className="library-list-stack">
-            {filteredFiles.length ? (
-              filteredFiles.map((item) => {
-                const active = item.doc_id === props.selectedDocumentId;
-                const job = jobsByDocId.get(item.doc_id) || null;
-                const pill = statusPresentation(item, job);
-                return (
-                  <button
-                    className={`list-card selectable library-doc-card ${active ? "active" : ""}`}
-                    key={item.doc_id}
-                    type="button"
-                    onClick={() => props.onSelectDocument(item.doc_id)}
-                  >
-                    <div className="card-topline">
-                      <strong>{item.title || item.filename}</strong>
-                      <span className={`status-pill ${pill.className}`}>{pill.label}</span>
-                    </div>
-                    <p className="muted-copy">{item.filename}</p>
-                    <p>{item.summary || "暂无摘要。"}</p>
-                    <div className="pill-row compact">
-                      <span className="status-pill status-neutral">{item.section_count} 节</span>
-                      <span className="status-pill status-neutral">{item.chunk_count} 块</span>
-                      <span className="status-pill status-neutral">{formatTimeLabel(item.uploaded_at)}</span>
-                    </div>
-                    <div className="pill-row compact">
-                      {(item.keywords || []).length ? (
-                        item.keywords.slice(0, 3).map((keyword) => (
-                          <span className="status-pill status-neutral" key={`${item.doc_id}-${keyword}`}>
-                            {keyword}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="status-pill status-neutral">{item.category}</span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })
-            ) : (
-              <div className="empty-state">{props.files.length ? "没有匹配到资料。" : "还没有上传任何资料。"}</div>
-            )}
-          </div>
-        </div>
+          <main className="min-w-0 bg-[radial-gradient(circle_at_top,_rgba(33,55,75,0.24),_transparent_42%)] px-6 py-6 2xl:px-8">
+            <div className="mx-auto flex max-w-[1380px] flex-col gap-5">
+              <TopHeader
+                title={displayDocument?.title || "知识库工作台"}
+                filename={displayDocument?.filename || "未选择资料"}
+                suffix={displayDocument?.suffix || ".pdf"}
+                uploadedAt={displayDocument ? formatTimeLabel(displayDocument.uploaded_at) : "--"}
+                statusLabel={statusLabel}
+                statusTone={statusTone}
+                onRefresh={props.onRefresh}
+                onDelete={() => displayDocument && !usingMockData && props.onDeleteDocument(displayDocument.doc_id)}
+                onExportSummary={() => props.onAskQuestion(`导出资料《${displayDocument?.title || "当前文档"}》的执行摘要。`)}
+                disableDelete={!displayDocument || usingMockData || props.deletingDocId === displayDocument.doc_id}
+                demo={usingMockData}
+              />
 
-        <div className="library-detail-column">
-          {props.detailBusy ? (
-            <div className="empty-state">正在加载资料详情...</div>
-          ) : props.selectedDocument ? (
-            <>
-              <div className="subpanel library-detail-hero">
-                <div className="panel-heading">
-                  <div>
-                    <p className="section-kicker">Document Detail</p>
-                    <h3>{props.selectedDocument.title || props.selectedDocument.filename}</h3>
-                    <p className="muted-copy">{props.selectedDocument.filename}</p>
+              <section className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
+                <aside className="rounded-[24px] border border-white/8 bg-[#0f1620]/88 p-4">
+                  <div className="mb-4 flex items-end justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Knowledge List</p>
+                      <h2 className="mt-1 text-sm font-semibold text-slate-100">资料列表</h2>
+                    </div>
+                    <span className="rounded-full border border-white/8 px-3 py-1 text-xs text-slate-400">{filteredFiles.length} 份</span>
                   </div>
-                  <div className="pill-row compact align-end">
-                    <span className={`status-pill ${activeStatus.className}`}>{activeStatus.label}</span>
-                    <button
-                      className="button ghost library-danger-button"
-                      type="button"
-                      onClick={() => props.onDeleteDocument(props.selectedDocument!.doc_id)}
-                      disabled={props.deletingDocId === props.selectedDocument.doc_id}
-                    >
-                      {props.deletingDocId === props.selectedDocument.doc_id ? "删除中..." : "删除资料"}
-                    </button>
-                  </div>
-                </div>
-                <div className="library-stat-grid">
-                  <div className="metric-tile mini">
-                    <span>分类</span>
-                    <strong>{props.selectedDocument.category}</strong>
-                  </div>
-                  <div className="metric-tile mini">
-                    <span>分节</span>
-                    <strong>{props.selectedDocument.section_count}</strong>
-                  </div>
-                  <div className="metric-tile mini">
-                    <span>分块</span>
-                    <strong>{props.selectedDocument.chunk_count}</strong>
-                  </div>
-                  <div className="metric-tile mini">
-                    <span>分页</span>
-                    <strong>{props.selectedDocument.pages.length}</strong>
-                  </div>
-                </div>
-                <div className="pill-row compact">
-                  <span className="status-pill status-neutral">{suffixLabel(props.selectedDocument.suffix)}</span>
-                  <span className="status-pill status-neutral">上传于 {formatTimeLabel(props.selectedDocument.uploaded_at)}</span>
-                </div>
-              </div>
-
-              <div className="tab-row library-tab-bar">
-                <button className={`tab-button ${activeTab === "preview" ? "active" : ""}`} type="button" onClick={() => setActiveTab("preview")}>
-                  正文预览
-                </button>
-                <button className={`tab-button ${activeTab === "chunks" ? "active" : ""}`} type="button" onClick={() => setActiveTab("chunks")}>
-                  分块查看
-                </button>
-                <button className={`tab-button ${activeTab === "pages" ? "active" : ""}`} type="button" onClick={() => setActiveTab("pages")}>
-                  页面预览
-                </button>
-              </div>
-
-              {activeTab === "preview" ? (
-                <div className="library-preview-grid">
-                  <article className="subpanel library-active-view library-summary-panel">
-                    <div className="subpanel-head">
-                      <h3>资料摘要</h3>
-                      <span className="status-pill status-neutral">{props.selectedDocument.chunks.length} 个分块已建索引</span>
-                    </div>
-                    <p>{props.selectedDocument.summary || "暂无摘要。"}</p>
-                    <pre className="library-text-preview">{previewExcerpt(props.selectedDocument)}</pre>
-                  </article>
-
-                  <article className="subpanel library-meta-panel">
-                    <div className="subpanel-head">
-                      <h3>结构概览</h3>
-                    </div>
-                    <div className="tag-row-block">
-                      <strong>标题提取</strong>
-                      <div className="library-chip-stack">
-                        {props.selectedDocument.headings.length ? (
-                          props.selectedDocument.headings.map((heading) => (
-                            <span className="status-pill status-neutral" key={heading}>
-                              {heading}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="status-pill status-neutral">未提取到标题结构</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="tag-row-block">
-                      <strong>关键词</strong>
-                      <div className="library-chip-stack">
-                        {props.selectedDocument.keywords.length ? (
-                          props.selectedDocument.keywords.map((keyword) => (
-                            <span className="status-pill status-neutral" key={keyword}>
-                              {keyword}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="status-pill status-neutral">暂无关键词</span>
-                        )}
-                      </div>
-                    </div>
-                  </article>
-
-                  <article className="subpanel full-span">
-                    <div className="subpanel-head">
-                      <h3>分节摘要</h3>
-                      {props.selectedDocument.sections.length > 12 ? (
-                        <button className="button ghost small" type="button" onClick={() => setShowAllSections((current) => !current)}>
-                          {showAllSections ? "收起" : `展开全部 (${props.selectedDocument.sections.length})`}
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="library-section-list">
-                      {visibleSections.length ? (
-                        visibleSections.map((section) => (
-                          <div className="list-card library-section-card" key={section.section_id}>
-                            <div className="card-topline">
-                              <strong>{section.title}</strong>
-                              <span className="status-pill status-neutral">{section.chunk_count} 块</span>
-                            </div>
-                            <p>{section.summary || "暂无摘要。"}</p>
-                            <div className="library-mini-list">
-                              {section.previews.slice(0, 3).map((chunk) => (
-                                <button
-                                  className="prompt-chip"
-                                  key={chunk.chunk_id}
-                                  type="button"
-                                  onClick={() => {
-                                    setActiveTab("chunks");
-                                    setActiveChunkId(chunk.chunk_id);
-                                  }}
-                                >
-                                  {chunk.chunk_title}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="empty-state">还没有生成章节结构。</div>
-                      )}
-                    </div>
-                  </article>
-                </div>
-              ) : null}
-
-              {activeTab === "chunks" ? (
-                <div className="library-explorer-grid">
-                  <div className="subpanel library-nav-panel">
-                    <div className="subpanel-head">
-                      <h3>分块列表</h3>
-                      <span className="status-pill status-neutral">{props.selectedDocument.chunks.length} 块</span>
-                    </div>
-                    <div className="library-nav-list">
-                      {props.selectedDocument.chunks.map((chunk) => (
-                        <button
-                          className={`list-card selectable library-nav-card ${chunk.chunk_id === activeChunk?.chunk_id ? "active" : ""}`}
-                          key={chunk.chunk_id}
-                          type="button"
-                          onClick={() => setActiveChunkId(chunk.chunk_id)}
-                        >
-                          <div className="card-topline">
-                            <strong>{chunk.chunk_title}</strong>
-                            <span className="status-pill status-neutral">{formatPageRange(chunk.page_start, chunk.page_end)}</span>
-                          </div>
-                          <p className="muted-copy">{chunk.section_title || "未分类"}</p>
-                          <p>{chunk.preview || "暂无预览。"}</p>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="subpanel">
-                    <ChunkViewer chunk={activeChunk} />
-                  </div>
-                </div>
-              ) : null}
-
-              {activeTab === "pages" ? (
-                <div className="library-explorer-grid">
-                  <div className="subpanel library-nav-panel">
-                    <div className="subpanel-head">
-                      <h3>页面列表</h3>
-                      <span className="status-pill status-neutral">{props.selectedDocument.pages.length} 页</span>
-                    </div>
-                    <div className="library-nav-list">
-                      {props.selectedDocument.pages.length ? (
-                        props.selectedDocument.pages.map((page) => (
+                  <input
+                    value={props.search}
+                    onChange={(event) => props.onSearchChange(event.target.value)}
+                    className="mb-4 w-full rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-600"
+                    placeholder="搜索标题、关键词、文件名"
+                  />
+                  <div className="max-h-[calc(100vh-19rem)] space-y-2 overflow-auto pr-1">
+                    {filteredFiles.length ? (
+                      filteredFiles.map((item) => {
+                        const active = item.doc_id === (displayDocument?.doc_id || props.selectedDocumentId);
+                        const itemJob = resolveJob(displayJobs, item.doc_id);
+                        return (
                           <button
-                            className={`list-card selectable library-nav-card ${page.page_number === activePage?.page_number ? "active" : ""}`}
-                            key={`${props.selectedDocument!.doc_id}-page-${page.page_number}`}
+                            key={item.doc_id}
                             type="button"
-                            onClick={() => setActivePageNumber(page.page_number)}
+                            onClick={() => {
+                              if (usingMockData) return;
+                              props.onSelectDocument(item.doc_id);
+                            }}
+                            className={`w-full rounded-2xl border px-4 py-4 text-left transition ${
+                              active ? "border-emerald-400/24 bg-emerald-400/[0.06]" : "border-white/8 bg-white/[0.02] hover:bg-white/[0.05]"
+                            }`}
                           >
-                            <div className="card-topline">
-                              <strong>第 {page.page_number} 页</strong>
-                              <span className="status-pill status-neutral">{page.chunks.length} 块</span>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium text-slate-100">{item.title || item.filename}</p>
+                                <p className="mt-1 text-xs text-slate-500">{item.filename}</p>
+                              </div>
+                              <span className="rounded-full border border-white/8 px-2.5 py-1 text-[11px] text-slate-400">
+                                {itemJob ? `${itemJob.stage}` : item.status === "completed" ? "已完成" : item.status}
+                              </span>
                             </div>
-                            <p>{page.preview || "暂无页面摘要。"}</p>
+                            <div className="mt-3 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-600">
+                              <span>{item.suffix.replace(".", "").toUpperCase()}</span>
+                              <span>{item.section_count} 章节</span>
+                              <span>{item.chunk_count} 分块</span>
+                            </div>
+                            <p className="mt-3 line-clamp-2 text-sm leading-6 text-slate-400">{item.summary || "暂无摘要。"}</p>
                           </button>
-                        ))
-                      ) : (
-                        <div className="empty-state">当前资料没有分页结果。</div>
-                      )}
-                    </div>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-2xl border border-dashed border-white/12 bg-white/[0.02] p-5 text-sm text-slate-400">
+                        没有匹配到资料。
+                      </div>
+                    )}
                   </div>
+                </aside>
 
-                  <div className="subpanel">
-                    <PageViewer page={activePage} />
-                  </div>
+                <div className="min-w-0 space-y-5">
+                  <DocumentMetaBar metrics={metrics} />
+                  <DocumentTabs
+                    activeTab={activeTab}
+                    document={displayDocument}
+                    loading={props.detailBusy}
+                    selectedChunkId={selectedChunkId}
+                    selectedPageNumber={selectedPageNumber}
+                    onChangeTab={(tab) => startTransition(() => setActiveTab(tab))}
+                    onSelectChunk={setSelectedChunkId}
+                    onSelectPage={setSelectedPageNumber}
+                    onAsk={(prompt) => {
+                      props.onAskQuestion(prompt);
+                      setSessionOpen(false);
+                    }}
+                  />
                 </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="empty-state">从左侧选择一份资料后，可以预览正文并查看它是如何被切分成章节与分块的。</div>
-          )}
+              </section>
+            </div>
+          </main>
+
+          <RightInsightPanel
+            collapsed={rightCollapsed}
+            onToggleCollapsed={() => setRightCollapsed((current) => !current)}
+            document={displayDocument}
+            sessions={displaySessions}
+            hits={displayHits}
+            onOpenSessions={() => setSessionOpen(true)}
+            onAsk={props.onAskQuestion}
+          />
         </div>
       </div>
-    </section>
+
+      <SessionDrawer
+        open={sessionOpen}
+        sessions={displaySessions}
+        activeConversationId={props.activeConversationId}
+        onClose={() => setSessionOpen(false)}
+        onOpenSession={(conversationId) => {
+          setSessionOpen(false);
+          if (!usingMockData) props.onOpenSession(conversationId);
+        }}
+      />
+    </>
   );
 }
