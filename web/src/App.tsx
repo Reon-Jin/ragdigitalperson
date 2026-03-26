@@ -1,6 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AvatarPanel } from "./components/AvatarPanel";
+import { TrendMiniChart } from "./components/TrendMiniChart";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { createApi } from "./lib/api";
 import { formatTimeLabel, joinTags, num, pct, splitTags, toneClass, turnover } from "./lib/format";
@@ -17,9 +17,9 @@ import type {
   ConversationSummary,
   DashboardOverview,
   DocumentDetail,
+  HealthPayload,
   LibraryFileItem,
   LocalAvatarProfile,
-  HealthPayload,
   ModelItem,
   SecurityPayload,
   StreamBaseEvent,
@@ -34,18 +34,30 @@ import type {
   UserProfile,
 } from "./types";
 
-const MAX_HISTORY = 8;
-const TASK_LABELS: Record<TaskType, string> = {
-  dashboard: "市场总览",
-  auto: "智能问答",
-  library: "资料管理",
-};
-const QUICK_PROMPTS = [
-  "结合我最近关注的方向，今天哪些 A 股值得继续跟踪？",
-  "请帮我总结市场总览里最值得继续追问的 3 个方向。",
-  "如果我偏中长期持有，当前市场更适合防御还是成长？",
-];
+type DeskSource = "hybrid" | "market" | "knowledge";
+type ThemeMode = "dark" | "light";
 
+const MAX_HISTORY = 8;
+const STATUS_LIMIT = 6;
+const DEFAULT_SUMMARY_TITLE = "等待分析";
+const DEFAULT_SUMMARY_TEXT = "输入问题或证券代码，系统会生成结构化投资分析。";
+const DEFAULT_RISK_ITEM = "等待系统生成风险提示";
+const DEFAULT_STATUS_ITEM = "Desk ready";
+const QUICK_PROMPTS = [
+  "结合当前市场情绪，今天最值得继续跟踪的方向是什么？",
+  "围绕我最近关注的股票，给我一个更偏专业风格的投资判断。",
+  "如果我偏中长期持有，当前更适合防御还是进攻？",
+];
+const SOURCE_LABELS: Record<DeskSource, string> = {
+  hybrid: "Hybrid Intelligence",
+  market: "Market Tape",
+  knowledge: "Research Vault",
+};
+const MODE_LABELS: Record<AnalysisMode, string> = {
+  professional: "Professional",
+  summary: "Summary",
+  teaching: "Teaching",
+};
 const EMPTY_PROFILE: UserProfile = {
   profile_id: "default",
   risk_level: "medium",
@@ -54,9 +66,8 @@ const EMPTY_PROFILE: UserProfile = {
   sector_preferences: [],
   style_preference: "advisor",
 };
-
 const EMPTY_MEMORY: AgentMemory = {
-  summary: "Agent 会在这里显示你的长期偏好、近期操作和最近关注标的。",
+  summary: "系统会在这里维护你的长期偏好、最近关注标的和近期操作线索。",
   recent_symbols: [],
   recent_sectors: [],
   preference_tags: [],
@@ -64,6 +75,21 @@ const EMPTY_MEMORY: AgentMemory = {
   recent_actions: [],
   updated_at: "",
 };
+
+function clamp(value: number, min = 0, max = 100): number {
+  if (Number.isNaN(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function unique(items: Array<string | undefined | null>): string[] {
+  return Array.from(
+    new Set(
+      items
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+    ),
+  );
+}
 
 function createLocalMessage(role: "user" | "assistant", content: string): ConversationMessage {
   return {
@@ -74,23 +100,130 @@ function createLocalMessage(role: "user" | "assistant", content: string): Conver
   };
 }
 
-function chartPath(history: Array<{ close?: number; open?: number }> = []): string[] {
-  const points = history.map((item) => Number(item.close ?? item.open)).filter((item) => Number.isFinite(item));
-  if (!points.length) return [];
-  const width = 640;
-  const height = 220;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = max - min || 1;
-  return points.map((value, index) => {
-    const x = ((index / Math.max(points.length - 1, 1)) * width).toFixed(2);
-    const y = (height - ((value - min) / range) * (height - 24) - 12).toFixed(2);
-    return `${index ? "L" : "M"} ${x} ${y}`;
-  });
+function pushStatusLine(current: string[], incoming: string): string[] {
+  const next = [...current, incoming].filter(Boolean);
+  return next.slice(-STATUS_LIMIT);
+}
+
+function markdownBlock(text: string) {
+  return { __html: renderMarkdown(text) };
+}
+
+function computeFallbackBullets(
+  security: SecurityPayload | null,
+  dashboard: DashboardOverview | null,
+  memory: AgentMemory,
+): string[] {
+  const bullets: string[] = [];
+
+  if (security?.quote?.symbol) {
+    bullets.push(`${security.quote.symbol} 当前价格 ${num(security.quote.last_price)}，涨跌 ${pct(security.quote.change_percent)}。`);
+  }
+  if (security?.technical?.momentum_label || security?.technical?.rsi14 != null) {
+    bullets.push(`技术面 ${security.technical?.momentum_label || "待确认"}，RSI14 ${num(security.technical?.rsi14)}。`);
+  }
+  if (security?.capital_flow?.summary) {
+    bullets.push(security.capital_flow.summary);
+  }
+  if (dashboard?.market_sentiment?.summary) {
+    bullets.push(dashboard.market_sentiment.summary);
+  }
+  if (memory.recent_symbols.length) {
+    bullets.push(`最近关注标的：${memory.recent_symbols.slice(0, 3).join(" / ")}。`);
+  }
+
+  return bullets.slice(0, 4);
+}
+
+function computeRiskScore(security: SecurityPayload | null): number {
+  if (!security) return 42;
+  const moveRisk = Math.abs(Number(security.quote?.change_percent || 0)) * 8;
+  const amplitudeRisk = Math.abs(Number(security.quote?.amplitude || 0)) * 4;
+  const leverageRisk = Number(security.profile?.debt_ratio || 0) * 0.35;
+  return clamp(moveRisk + amplitudeRisk + leverageRisk);
+}
+
+function computeLiquidityScore(security: SecurityPayload | null): number {
+  if (!security) return 48;
+  const turnoverRate = Number(security.quote?.turnover_rate || 0) * 8;
+  const turnoverWeight = Number(security.quote?.turnover || 0) >= 1e9 ? 30 : Number(security.quote?.turnover || 0) >= 1e8 ? 18 : 10;
+  return clamp(turnoverRate + turnoverWeight);
+}
+
+function computeConfidenceScore(cards: AnalysisCard[], citations: CitationItem[], security: SecurityPayload | null): number {
+  return clamp(cards.length * 18 + citations.length * 10 + (security?.quote?.symbol ? 28 : 12));
+}
+
+function initialsOf(value: string): string {
+  const clean = String(value || "").trim();
+  if (!clean) return "FA";
+  const compact = clean.replace(/\s+/g, "");
+  return compact.slice(0, 2).toUpperCase();
 }
 
 function MarkdownBlock({ text }: { text: string }) {
-  return <div dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
+  return <div className="markdown-block" dangerouslySetInnerHTML={markdownBlock(text)} />;
+}
+
+function SkeletonBlock({ className = "" }: { className?: string }) {
+  return <div className={`skeleton-block ${className}`.trim()} aria-hidden="true" />;
+}
+
+function InsightMetric(props: { label: string; value: string; note?: string; tone?: string }) {
+  return (
+    <article className="insight-metric">
+      <span>{props.label}</span>
+      <strong className={props.tone || ""}>{props.value}</strong>
+      <small>{props.note || " "}</small>
+    </article>
+  );
+}
+
+function ProgressMeter(props: { label: string; value: number; note: string; tone?: "risk" | "positive" | "neutral" }) {
+  const width = `${clamp(props.value)}%`;
+  return (
+    <div className="progress-meter">
+      <div className="progress-meter-head">
+        <span>{props.label}</span>
+        <strong>{Math.round(clamp(props.value))}</strong>
+      </div>
+      <div className="progress-track">
+        <div className={`progress-fill ${props.tone || "neutral"}`} style={{ width }} />
+      </div>
+      <small>{props.note}</small>
+    </div>
+  );
+}
+
+function TagCluster(props: { title: string; items: string[]; emptyLabel?: string }) {
+  return (
+    <div className="tag-cluster">
+      <div className="cluster-head">
+        <span>{props.title}</span>
+      </div>
+      <div className="tag-grid">
+        {props.items.length ? (
+          props.items.map((item) => (
+            <span className="tv-tag" key={`${props.title}-${item}`}>
+              {item}
+            </span>
+          ))
+        ) : (
+          <span className="tv-tag muted">{props.emptyLabel || "暂无"}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge(props: { state: "idle" | "loading" | "warn" }) {
+  const label = props.state === "loading" ? "Analyzing" : props.state === "warn" ? "Attention" : "Online";
+  return (
+    <span className={`status-badge ${props.state}`}>
+      <i />
+      {label}
+    </span>
+  );
 }
 
 function AuthScreen(props: {
@@ -103,103 +236,64 @@ function AuthScreen(props: {
 }) {
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [registerUsername, setRegisterUsername] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
-
-  const submitLogin = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    await props.onLogin(loginUsername.trim(), loginPassword);
-  };
-
-  const submitRegister = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    await props.onRegister(registerUsername.trim(), registerPassword, displayName.trim());
-  };
+  const [displayName, setDisplayName] = useState("");
 
   return (
-    <main className="auth-layout">
-      <section className="auth-story panel hero-surface">
-        <div className="hero-orbit hero-orbit-a" />
-        <div className="hero-orbit hero-orbit-b" />
-        <p className="section-kicker">FinAvatar</p>
-        <h1>把金融 Copilot 升级成企业工作台与真人数字人分析席位。</h1>
-        <p className="hero-copy">
-          实时市场数据、私有知识库、结构化分析卡片、证据引用和会话记忆被整合在同一套界面里，杜绝工具堆砌式前端。
-        </p>
-        <div className="hero-grid">
-          <article className="hero-stat">
-            <span>实时总览</span>
-            <strong>Dashboard + 个股查询</strong>
-          </article>
-          <article className="hero-stat">
-            <span>数字人</span>
-            <strong>ww自建数字人</strong>
-          </article>
-          <article className="hero-stat">
-            <span>知识链路</span>
-            <strong>私有资料上传与证据引用</strong>
-          </article>
+    <main className="auth-shell">
+      <section className="auth-hero panel">
+        <div className="brand-lockup">
+          <div className="brand-mark">FA</div>
+          <div>
+            <p className="eyebrow">FinAvatar Terminal</p>
+            <h1>专业金融终端级数字人工作台</h1>
+          </div>
+        </div>
+        <p className="hero-copy">实时行情、结构化分析、风险提示和会话记忆被整合到同一套深色终端界面中，聚焦“数据分析 + 决策辅助”。</p>
+        <div className="hero-matrix">
+          <article className="hero-stat"><span>Desk</span><strong>Market + AI Analysis</strong></article>
+          <article className="hero-stat"><span>Risk</span><strong>Structured Warning System</strong></article>
+          <article className="hero-stat"><span>Memory</span><strong>Persistent Research Context</strong></article>
         </div>
       </section>
 
-      <section className="auth-card panel">
-        <div className="tab-row">
-          <button className={`tab-button ${props.mode === "login" ? "active" : ""}`} type="button" onClick={() => props.onSwitch("login")}>
-            登录
-          </button>
-          <button className={`tab-button ${props.mode === "register" ? "active" : ""}`} type="button" onClick={() => props.onSwitch("register")}>
-            注册
-          </button>
+      <section className="auth-panel panel">
+        <div className="auth-switch">
+          <button className={`switch-pill ${props.mode === "login" ? "active" : ""}`} type="button" onClick={() => props.onSwitch("login")}>登录</button>
+          <button className={`switch-pill ${props.mode === "register" ? "active" : ""}`} type="button" onClick={() => props.onSwitch("register")}>注册</button>
         </div>
 
         {props.mode === "login" ? (
-          <form className="form-grid" onSubmit={(event) => void submitLogin(event)}>
-            <label className="field">
-              <span>用户名</span>
-              <input value={loginUsername} onChange={(event) => setLoginUsername(event.target.value)} required />
-            </label>
-            <label className="field">
-              <span>密码</span>
-              <input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required />
-            </label>
-            <button className="button primary" type="submit" disabled={props.busy}>
-              {props.busy ? "登录中..." : "登录并进入工作台"}
-            </button>
+          <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void props.onLogin(loginUsername.trim(), loginPassword); }}>
+            <label className="field"><span>账户</span><input value={loginUsername} onChange={(event) => setLoginUsername(event.target.value)} required /></label>
+            <label className="field"><span>密码</span><input type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required /></label>
+            <button className="button primary" type="submit" disabled={props.busy}>{props.busy ? "登录中..." : "进入终端"}</button>
           </form>
         ) : (
-          <form className="form-grid" onSubmit={(event) => void submitRegister(event)}>
-            <label className="field">
-              <span>显示名称</span>
-              <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-            </label>
-            <label className="field">
-              <span>用户名</span>
-              <input value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} required />
-            </label>
-            <label className="field">
-              <span>密码</span>
-              <input type="password" value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} required />
-            </label>
-            <button className="button primary" type="submit" disabled={props.busy}>
-              {props.busy ? "注册中..." : "注册并创建专属席位"}
-            </button>
+          <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void props.onRegister(registerUsername.trim(), registerPassword, displayName.trim()); }}>
+            <label className="field"><span>显示名称</span><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
+            <label className="field"><span>账户</span><input value={registerUsername} onChange={(event) => setRegisterUsername(event.target.value)} required /></label>
+            <label className="field"><span>密码</span><input type="password" value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} required /></label>
+            <button className="button primary" type="submit" disabled={props.busy}>{props.busy ? "创建中..." : "创建工作台"}</button>
           </form>
         )}
 
-        <p className={`auth-note ${props.error ? "is-error" : ""}`}>{props.error || "每个用户拥有独立对话、画像、长期记忆和私有知识库。"}</p>
+        <p className={`auth-note ${props.error ? "error" : ""}`}>{props.error || "每个账户拥有独立会话、长期记忆、私有资料库和金融分析偏好。"}</p>
       </section>
     </main>
   );
 }
 
 export default function App() {
+  const [theme] = useState<ThemeMode>("dark");
   const [token, setToken] = useState<string>(() => window.localStorage.getItem(TOKEN_KEY) || "");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [task, setTask] = useState<TaskType>("dashboard");
+  const [deskSource, setDeskSource] = useState<DeskSource>("hybrid");
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("professional");
   const [models, setModels] = useState<ModelItem[]>([]);
   const [modelProvider, setModelProvider] = useState("deepseek");
@@ -219,28 +313,35 @@ export default function App() {
   const [securityBusy, setSecurityBusy] = useState(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string>(() => window.localStorage.getItem(ACTIVE_CONV_KEY) || "");
-  const [conversationTitle, setConversationTitle] = useState("新对话");
+  const [conversationTitle, setConversationTitle] = useState("新会话");
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [cards, setCards] = useState<AnalysisCard[]>([]);
   const [citations, setCitations] = useState<CitationItem[]>([]);
-  const [summaryTitle, setSummaryTitle] = useState("等待分析");
-  const [summaryText, setSummaryText] = useState("你可以直接给出选股需求，Agent 会结合记忆、行情、新闻和知识库继续分析。");
+  const [summaryTitle, setSummaryTitle] = useState(DEFAULT_SUMMARY_TITLE);
+  const [summaryText, setSummaryText] = useState(DEFAULT_SUMMARY_TEXT);
   const [summaryBullets, setSummaryBullets] = useState<string[]>([]);
-  const [riskItems, setRiskItems] = useState<string[]>(["尚未生成风险提示。"]);
-  const [statusItems, setStatusItems] = useState<string[]>(["系统待命。"]);
+  const [riskItems, setRiskItems] = useState<string[]>([DEFAULT_RISK_ITEM]);
+  const [statusItems, setStatusItems] = useState<string[]>([DEFAULT_STATUS_ITEM]);
   const [streaming, setStreaming] = useState(false);
-  const [routeBadge, setRouteBadge] = useState("待识别");
-  const [agentTitle, setAgentTitle] = useState("待命中");
-  const [agentCaption, setAgentCaption] = useState("市场总览与长期记忆同步后，可以直接开始问答或查询个股。");
+  const [routeBadge, setRouteBadge] = useState("Waiting");
+  const [agentTitle, setAgentTitle] = useState("Desk Ready");
+  const [agentCaption, setAgentCaption] = useState("等待新的证券查询或分析问题。");
   const [agentState, setAgentState] = useState<"idle" | "loading" | "warn">("idle");
   const [avatarVoiceEnabled, setAvatarVoiceEnabled] = useState<boolean>(() => window.localStorage.getItem(AVATAR_VOICE_KEY) === "1");
   const [avatarProfile, setAvatarProfile] = useState<LocalAvatarProfile | null>(null);
   const [lastAssistantMessage, setLastAssistantMessage] = useState("");
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
   const answerRef = useRef("");
   const assistantMessageIdRef = useRef("");
+  const messageStreamRef = useRef<HTMLDivElement | null>(null);
+  const lastSpokenRef = useRef("");
+
+  const appendStatus = useCallback((text: string) => {
+    setStatusItems((current) => pushStatusLine(current, text));
+  }, []);
 
   const handleUnauthorized = useCallback(() => {
     window.localStorage.removeItem(TOKEN_KEY);
@@ -250,7 +351,7 @@ export default function App() {
     setMessages([]);
     setConversations([]);
     setActiveConversationId("");
-    setConversationTitle("新对话");
+    setConversationTitle("新会话");
     setCards([]);
     setCitations([]);
     setSecurity(null);
@@ -271,24 +372,26 @@ export default function App() {
   const applyCards = useCallback((nextCards: AnalysisCard[]) => {
     setCards(nextCards);
     if (!nextCards.length) {
-      setSummaryTitle("等待分析");
-      setSummaryText("你可以直接给出选股需求，Agent 会结合记忆、行情、新闻和知识库继续分析。");
+      setSummaryTitle(DEFAULT_SUMMARY_TITLE);
+      setSummaryText(DEFAULT_SUMMARY_TEXT);
       setSummaryBullets([]);
-      setRiskItems(["尚未生成风险提示。"]);
+      setRiskItems([DEFAULT_RISK_ITEM]);
       return;
     }
+
     const conclusion = nextCards.find((card) => card.card_type === "conclusion") || nextCards[0];
     const riskCard = nextCards.find((card) => card.card_type === "risk");
+
     setSummaryTitle(conclusion?.title || "分析完成");
-    setSummaryText(conclusion?.summary || "已生成本轮结构化分析。");
+    setSummaryText(conclusion?.summary || DEFAULT_SUMMARY_TEXT);
     setSummaryBullets((conclusion?.items || []).slice(0, 4));
-    setRiskItems(riskCard?.items?.length ? riskCard.items : ["暂无额外风险提示。"]);
+    setRiskItems(riskCard?.items?.length ? riskCard.items : [DEFAULT_RISK_ITEM]);
   }, []);
 
   const resetInsightPanels = useCallback(() => {
     applyCards([]);
     setCitations([]);
-    setStatusItems(["系统待命。"]);
+    setStatusItems([DEFAULT_STATUS_ITEM]);
   }, [applyCards]);
 
   const loadLibraryDocument = useCallback(async (docId: string) => {
@@ -304,7 +407,7 @@ export default function App() {
       setSelectedLibraryDoc(detail);
     } catch (error) {
       setSelectedLibraryDoc(null);
-      setAgent("warn", "资料加载失败", error instanceof Error ? error.message : "无法读取资料详情。");
+      setAgent("warn", "Document Load Failed", error instanceof Error ? error.message : "无法读取资料详情。");
     } finally {
       setLibraryDetailBusy(false);
     }
@@ -319,19 +422,24 @@ export default function App() {
       setSelectedLibraryDoc(null);
       return files;
     }
+
     const requestedId = preferredDocId === undefined ? selectedLibraryDocId : preferredDocId || "";
     const nextId = requestedId && files.some((item) => item.doc_id === requestedId) ? requestedId : files[0].doc_id;
-    if (!nextId) {
-      setSelectedLibraryDocId("");
-      setSelectedLibraryDoc(null);
-      return files;
-    }
-    await loadLibraryDocument(nextId);
+    if (nextId) await loadLibraryDocument(nextId);
     return files;
   }, [api, loadLibraryDocument, selectedLibraryDocId]);
 
   const refreshCoreData = useCallback(async () => {
-    const results = await Promise.allSettled([api.dashboard(), api.health(), api.memory(), api.files(), api.models(), api.profile(), api.avatarProfile()]);
+    const results = await Promise.allSettled([
+      api.dashboard(),
+      api.health(),
+      api.memory(),
+      api.files(),
+      api.models(),
+      api.profile(),
+      api.avatarProfile(),
+    ]);
+
     if (results[0].status === "fulfilled") setDashboard(results[0].value);
     if (results[1].status === "fulfilled") setHealth(results[1].value);
     if (results[2].status === "fulfilled") setMemory(results[2].value);
@@ -358,7 +466,7 @@ export default function App() {
 
   const applyConversation = useCallback((session: ConversationSession) => {
     setActiveConversationId(session.conversation_id);
-    setConversationTitle(session.title || "新对话");
+    setConversationTitle(session.title || "新会话");
     setMessages(session.messages || []);
     window.localStorage.setItem(ACTIVE_CONV_KEY, session.conversation_id);
   }, []);
@@ -393,16 +501,17 @@ export default function App() {
     const normalized = String(query || securityQuery).trim();
     if (!normalized) return;
     setSecurityBusy(true);
-    setAgent("loading", "查询个股", "正在拉取实时行情、K 线、资金流和重点事件。");
+    setTask("dashboard");
+    setAgent("loading", "Fetching Security", "正在拉取实时行情、技术面和事件流。");
     try {
       const result = await api.queryStock(normalized);
       setSecurity(result);
       setSecurityQuery(result.quote?.symbol || normalized);
-      setAgent("idle", "个股详情已更新", "你可以继续围绕这只股票追问，系统会把它写入近期上下文。");
+      setAgent("idle", "Security Updated", "中区已经同步刷新为最新证券分析视图。");
       const memorySnapshot = await api.memory();
       setMemory(memorySnapshot);
     } catch (error) {
-      setAgent("warn", "查询失败", error instanceof Error ? error.message : "未能识别该标的。");
+      setAgent("warn", "Security Query Failed", error instanceof Error ? error.message : "未能识别该证券。");
     } finally {
       setSecurityBusy(false);
     }
@@ -413,10 +522,12 @@ export default function App() {
     const form = event.currentTarget;
     const input = form.querySelector('input[type="file"]') as HTMLInputElement | null;
     if (!input?.files?.length) return;
+
     const body = new FormData();
     Array.from(input.files).forEach((file) => body.append("files", file));
     body.append("model_provider", modelProvider || "deepseek");
-    setAgent("loading", "上传资料中", "正在写入你的私有知识库。");
+
+    setAgent("loading", "Syncing Research", "正在写入私有知识库。");
     try {
       const result = await api.upload(body);
       input.value = "";
@@ -424,9 +535,9 @@ export default function App() {
       const [, memorySnapshot] = await Promise.all([refreshLibrary(preferredDocId), api.memory()]);
       setMemory(memorySnapshot);
       if (preferredDocId) setTask("library");
-      setAgent("idle", "资料已入库", preferredDocId ? "已切换到资料管理，可继续预览和核对分块。" : "后续问答会优先引用你的私有资料。");
+      setAgent("idle", "Vault Updated", preferredDocId ? "资料已入库，已切换到资料视图。" : "上传完成。");
     } catch (error) {
-      setAgent("warn", "上传失败", error instanceof Error ? error.message : "上传失败。");
+      setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "上传失败。");
     }
   }, [api, modelProvider, refreshLibrary, setAgent]);
 
@@ -439,9 +550,9 @@ export default function App() {
       const saved = await api.saveProfile(payload);
       setProfile(saved);
       setMemory(await api.memory());
-      setAgent("idle", "画像已保存", "风险偏好、投资期限与关注方向已写入长期记忆。");
+      setAgent("idle", "Profile Saved", "投资偏好已写入长期记忆。");
     } catch (error) {
-      setAgent("warn", "画像保存失败", error instanceof Error ? error.message : "保存失败。");
+      setAgent("warn", "Profile Save Failed", error instanceof Error ? error.message : "保存失败。");
     }
   }, [api, profile, setAgent, user?.user_id]);
 
@@ -454,48 +565,54 @@ export default function App() {
       const payload = event as StreamConversationEvent;
       if (payload.conversation?.conversation_id) {
         setActiveConversationId(payload.conversation.conversation_id);
-        setConversationTitle(payload.conversation.title || "当前对话");
+        setConversationTitle(payload.conversation.title || "当前会话");
         window.localStorage.setItem(ACTIVE_CONV_KEY, payload.conversation.conversation_id);
       }
       return;
     }
+
     if (event.type === "ack" || event.type === "market_fetch_started" || event.type === "rag_fetch_started") {
       const payload = event as StreamBaseEvent;
-      if (payload.message) {
-        setStatusItems((current) => [...current, payload.message || "处理中。"]);
-      }
+      if (payload.message) appendStatus(payload.message);
       return;
     }
+
     if (event.type === "route") {
       const payload = event as StreamRouteEvent;
       setRouteBadge(`${payload.route.task_type} / ${payload.route.reason}`);
-      setStatusItems((current) => [...current, `已路由到 ${payload.route.task_type}`]);
+      appendStatus(`Route: ${payload.route.task_type}`);
       return;
     }
+
     if (event.type === "market_fetch_done") {
       const payload = event as StreamBaseEvent;
-      setStatusItems((current) => [...current, payload.degraded ? "实时数据阶段已降级。" : "实时数据已返回。"]);
+      appendStatus(payload.degraded ? "实时行情已降级" : "实时行情拉取完成");
       return;
     }
+
     if (event.type === "rag_fetch_done") {
       const payload = event as StreamBaseEvent & { citations?: CitationItem[] };
-      setStatusItems((current) => [...current, payload.degraded ? "知识证据阶段已降级。" : `已匹配 ${payload.citations?.length || 0} 条证据。`]);
+      appendStatus(payload.degraded ? "知识证据已降级" : `知识证据就绪 (${payload.citations?.length || 0})`);
       return;
     }
+
     if (event.type === "analysis_cards") {
       applyCards((event as StreamCardsEvent).cards || []);
       return;
     }
+
     if (event.type === "citations") {
       setCitations((event as StreamCitationsEvent).items || []);
       return;
     }
+
     if (event.type === "delta") {
       const payload = event as StreamDeltaEvent;
       answerRef.current += payload.delta || "";
       updateAssistantMessage(assistantMessageIdRef.current, answerRef.current || "正在生成...");
       return;
     }
+
     if (event.type === "final") {
       const payload = event as StreamFinalEvent;
       const answer = payload.answer || answerRef.current;
@@ -503,34 +620,34 @@ export default function App() {
       updateAssistantMessage(assistantMessageIdRef.current, answer);
       applyCards(payload.cards || []);
       setCitations(payload.citations || []);
-      setRouteBadge(`${payload.route?.task_type || "analysis"} / 完成`);
-      setAgent("idle", "分析完成", `已完成对“${source.slice(0, 18)}”的分析。`);
+      setRouteBadge(`${payload.route?.task_type || "analysis"} / complete`);
+      setAgent("idle", "Analysis Complete", `已完成“${source.slice(0, 18)}”的分析。`);
       setLastAssistantMessage(answer);
       return;
     }
+
     if (event.type === "error") {
       const payload = event as StreamBaseEvent & { detail?: string };
       updateAssistantMessage(assistantMessageIdRef.current, `分析失败：${payload.detail || "unknown error"}`);
-      setRouteBadge("异常");
-      setAgent("warn", "分析异常", "本次回答未完整返回。");
+      setRouteBadge("Error");
+      setAgent("warn", "Analysis Error", "本次回答未完整返回。");
     }
-  }, [applyCards, setAgent, updateAssistantMessage]);
-
+  }, [appendStatus, applyCards, setAgent, updateAssistantMessage]);
 
   const submitMessage = useCallback(async (rawText?: string) => {
     const message = String(rawText || draft).trim();
     if (!message) return;
     if (controllerRef.current) controllerRef.current.abort();
-    setTask("auto");
+
     setDraft("");
     resetInsightPanels();
-    setRouteBadge("路由中");
+    setRouteBadge("Routing");
     setStatusItems([
-      "请求已发送。",
-      security?.quote?.symbol ? `沿用 ${security.quote.symbol} 的已选标的上下文。` : "未做前置证券解析，直接进入流式分析。",
-      "正在连接分析引擎与证据链路。",
+      "请求已发送",
+      security?.quote?.symbol ? `沿用证券上下文：${security.quote.symbol}` : "无预选证券上下文",
+      `Source focus: ${SOURCE_LABELS[deskSource]}`,
     ]);
-    setAgent("loading", "正在分析", "已跳过前置阻塞解析，直接开始流式检索与生成。");
+    setAgent("loading", "Streaming Analysis", "正在执行实时检索与结构化生成。");
     answerRef.current = "";
 
     let conversationId = activeConversationId;
@@ -557,7 +674,7 @@ export default function App() {
           conversation_id: conversationId,
           history: messages.slice(-MAX_HISTORY).map((item) => ({ role: item.role, content: item.content })),
           context_hint: {
-            task_type: null,
+            source_focus: deskSource,
             symbol: security?.quote?.symbol || null,
             company: security?.profile?.company_name || null,
             sector: security?.profile?.sector || null,
@@ -569,19 +686,19 @@ export default function App() {
     } catch (error) {
       const detail = error instanceof Error ? error.message : "请求异常";
       updateAssistantMessage(assistantMessageIdRef.current, detail);
-      setRouteBadge("异常");
-      setAgent("warn", "分析异常", detail);
+      setRouteBadge("Error");
+      setAgent("warn", "Analysis Error", detail);
     } finally {
       controllerRef.current = null;
       setStreaming(false);
       const [conversationList, memorySnapshot] = await Promise.allSettled([refreshConversations(), api.memory()]);
       if (conversationList.status === "fulfilled") {
         const currentConversation = conversationList.value.find((item) => item.conversation_id === conversationId);
-        if (currentConversation) setConversationTitle(currentConversation.title || "新对话");
+        if (currentConversation) setConversationTitle(currentConversation.title || "新会话");
       }
       if (memorySnapshot.status === "fulfilled") setMemory(memorySnapshot.value);
     }
-  }, [activeConversationId, analysisMode, api, createConversation, draft, messages, modelProvider, processStreamEvent, refreshConversations, resetInsightPanels, security?.profile?.company_name, security?.profile?.sector, security?.quote?.symbol, setAgent, updateAssistantMessage]);
+  }, [activeConversationId, analysisMode, api, createConversation, deskSource, draft, messages, modelProvider, processStreamEvent, refreshConversations, resetInsightPanels, security?.profile?.company_name, security?.profile?.sector, security?.quote?.symbol, setAgent, updateAssistantMessage]);
 
   const removeConversation = useCallback(async () => {
     if (!activeConversationId) return;
@@ -595,15 +712,15 @@ export default function App() {
   const deleteLibraryDocument = useCallback(async (docId: string) => {
     if (!docId) return;
     const current = libraryFiles.find((item) => item.doc_id === docId);
-    const confirmed = window.confirm(`确认删除资料「${current?.title || current?.filename || docId}」？这会同时删除原文件和知识库索引。`);
+    const confirmed = window.confirm(`确认删除资料「${current?.title || current?.filename || docId}」？这会同时移除原文件与索引。`);
     if (!confirmed) return;
     setLibraryDeletingDocId(docId);
     try {
       await api.deleteLibraryDocument(docId);
       await refreshLibrary(selectedLibraryDocId === docId ? "" : selectedLibraryDocId);
-      setAgent("idle", "资料已删除", "原始文件与知识库索引已同步移除。");
+      setAgent("idle", "Document Removed", "资料与索引已同步删除。");
     } catch (error) {
-      setAgent("warn", "删除失败", error instanceof Error ? error.message : "资料删除失败。");
+      setAgent("warn", "Delete Failed", error instanceof Error ? error.message : "资料删除失败。");
     } finally {
       setLibraryDeletingDocId("");
     }
@@ -615,7 +732,7 @@ export default function App() {
       try {
         await api.logout();
       } catch {
-        // ignore logout failures
+        // ignore logout errors
       }
     }
     handleUnauthorized();
@@ -623,8 +740,36 @@ export default function App() {
   }, [api, handleUnauthorized, resetInsightPanels, token]);
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
     window.localStorage.setItem(AVATAR_VOICE_KEY, avatarVoiceEnabled ? "1" : "0");
   }, [avatarVoiceEnabled]);
+
+  useEffect(() => {
+    if (!avatarVoiceEnabled || !lastAssistantMessage.trim()) return;
+    if (lastAssistantMessage === lastSpokenRef.current) return;
+    lastSpokenRef.current = lastAssistantMessage;
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(lastAssistantMessage);
+    utterance.lang = avatarProfile?.default_language || "zh-CN";
+    if (avatarProfile?.voice_name && avatarProfile.voice_name !== "default") {
+      const matched = window.speechSynthesis.getVoices().find((voice) => voice.name === avatarProfile.voice_name);
+      if (matched) utterance.voice = matched;
+    }
+    window.speechSynthesis.speak(utterance);
+    return () => {
+      window.speechSynthesis.cancel();
+    };
+  }, [avatarProfile?.default_language, avatarProfile?.voice_name, avatarVoiceEnabled, lastAssistantMessage]);
+
+  useEffect(() => {
+    const viewport = messageStreamRef.current;
+    if (!viewport) return;
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
+  }, [messages, streaming]);
 
   useEffect(() => {
     if (task !== "library" || libraryDetailBusy) return;
@@ -634,16 +779,14 @@ export default function App() {
       return;
     }
     const hasSelected = selectedLibraryDocId && libraryFiles.some((item) => item.doc_id === selectedLibraryDocId);
-    if (selectedLibraryDoc && selectedLibraryDoc.doc_id === selectedLibraryDocId && hasSelected) {
-      return;
-    }
+    if (selectedLibraryDoc && selectedLibraryDoc.doc_id === selectedLibraryDocId && hasSelected) return;
     const nextId = hasSelected ? selectedLibraryDocId : libraryFiles[0].doc_id;
-    if (!nextId) return;
-    void loadLibraryDocument(nextId);
+    if (nextId) void loadLibraryDocument(nextId);
   }, [libraryDetailBusy, libraryFiles, loadLibraryDocument, selectedLibraryDoc, selectedLibraryDocId, task]);
 
   useEffect(() => {
     let active = true;
+
     const restore = async (): Promise<void> => {
       if (!token) return;
       try {
@@ -654,15 +797,16 @@ export default function App() {
           return;
         }
         setUser(session.user);
-        setAgent("loading", "初始化中", "正在同步你的画像、记忆、总览与对话历史。");
+        setAgent("loading", "Initializing", "正在同步用户画像、行情和会话历史。");
         await refreshCoreData();
         await initConversations();
-        setAgent("idle", "待命中", "市场总览与长期记忆已同步，可以开始工作。");
+        setAgent("idle", "Desk Ready", "市场与研究上下文已同步。");
       } catch {
         if (!active) return;
         handleUnauthorized();
       }
     };
+
     void restore();
     return () => {
       active = false;
@@ -674,9 +818,7 @@ export default function App() {
     const timer = window.setInterval(() => {
       if (streaming || document.hidden) return;
       void refreshCoreData();
-      if (security?.quote?.symbol) {
-        void queryStock(security.quote.symbol);
-      }
+      if (security?.quote?.symbol) void queryStock(security.quote.symbol);
     }, 60000);
     return () => window.clearInterval(timer);
   }, [queryStock, refreshCoreData, security?.quote?.symbol, streaming, token, user]);
@@ -689,10 +831,10 @@ export default function App() {
       setToken(payload.token);
       setUser(payload.user);
       window.localStorage.setItem(TOKEN_KEY, payload.token);
-      setAgent("loading", "初始化中", "正在同步你的画像、记忆、总览与对话历史。");
+      setAgent("loading", "Initializing", "正在同步用户工作台。");
       await refreshCoreData();
       await initConversations();
-      setAgent("idle", "待命中", "工作台已准备就绪。");
+      setAgent("idle", "Desk Ready", "工作台已就绪。");
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "登录失败");
     } finally {
@@ -708,10 +850,10 @@ export default function App() {
       setToken(payload.token);
       setUser(payload.user);
       window.localStorage.setItem(TOKEN_KEY, payload.token);
-      setAgent("loading", "初始化中", "正在创建你的工作台和长期记忆。");
+      setAgent("loading", "Bootstrapping", "正在创建专属金融工作台。");
       await refreshCoreData();
       await initConversations();
-      setAgent("idle", "待命中", "专属席位已经创建完成。");
+      setAgent("idle", "Desk Ready", "专属工作台已创建完成。");
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "注册失败");
     } finally {
@@ -719,110 +861,148 @@ export default function App() {
     }
   };
 
+  const displayedSecurityName = security?.quote?.name || security?.profile?.company_name || security?.quote?.symbol || "Market Focus";
+  const displayedTicker = security?.quote?.symbol || "CN-MKT";
+  const displayedPrice = security?.quote?.last_price ?? dashboard?.indices?.[0]?.last_price;
+  const displayedChange = security?.quote?.change_percent ?? dashboard?.indices?.[0]?.change_percent;
+  const sparkValues = useMemo(() => (security?.history || []).map((item) => Number(item.close ?? item.open)).filter((item) => Number.isFinite(item)), [security?.history]);
+  const marketBullets = useMemo(() => computeFallbackBullets(security, dashboard, memory), [dashboard, memory, security]);
+  const displayedBullets = summaryBullets.length ? summaryBullets : marketBullets;
+  const displayedSummaryTitle = summaryTitle === DEFAULT_SUMMARY_TITLE ? (security?.quote?.symbol ? "AI Investment Analysis" : "Market Strategy Snapshot") : summaryTitle;
+  const displayedSummaryText = summaryText === DEFAULT_SUMMARY_TEXT
+    ? security?.quote?.symbol
+      ? `${displayedSecurityName} 当前处于 ${security?.technical?.momentum_label || "待确认"} 节奏，结合 ${SOURCE_LABELS[deskSource]} 进行研判。`
+      : dashboard?.market_sentiment?.summary || "等待新的证券查询或对话输入。"
+    : summaryText;
+
+  const displayedRisks = riskItems.length && riskItems[0] !== DEFAULT_RISK_ITEM
+    ? riskItems
+    : unique([
+        security?.quote?.amplitude != null ? `波动率 ${pct(security.quote.amplitude)}，短线风险需控制仓位。` : "",
+        security?.profile?.debt_ratio != null ? `资产负债率 ${pct(security.profile.debt_ratio)}，注意杠杆约束。` : "",
+        dashboard?.market_sentiment?.regime ? `当前市场风格为 ${dashboard.market_sentiment.regime}，避免与主导风格逆向重仓。` : "",
+      ]).slice(0, 3);
+
+  const riskScore = computeRiskScore(security);
+  const liquidityScore = computeLiquidityScore(security);
+  const confidenceScore = computeConfidenceScore(cards, citations, security);
+  const rsiScore = clamp(Number(security?.technical?.rsi14 ?? 50));
+  const keyTags = unique([
+    security?.profile?.sector,
+    security?.profile?.industry,
+    security?.technical?.momentum_label,
+    ...memory.preference_tags.slice(0, 3),
+  ]);
+
+  const referenceItems = useMemo(() => {
+    if (deskSource === "market") {
+      return (security?.news || dashboard?.latest_events || []).slice(0, 4).map((item) => ({
+        title: item.title || item.theme || "市场事件",
+        summary: item.summary || item.agent_reason || "暂无摘要",
+        meta: [item.source || "Market", formatTimeLabel(item.publish_time)].filter(Boolean).join("  "),
+      }));
+    }
+
+    if (deskSource === "knowledge") {
+      return citations.slice(0, 4).map((item) => ({
+        title: item.title || "知识证据",
+        summary: item.preview || "暂无摘要",
+        meta: [item.section_title || "Research", item.time_label ? formatTimeLabel(item.time_label) : ""].filter(Boolean).join("  "),
+      }));
+    }
+
+    const hybrid = [
+      ...citations.slice(0, 2).map((item) => ({
+        title: item.title || "知识证据",
+        summary: item.preview || "暂无摘要",
+        meta: [item.section_title || "Research", item.time_label ? formatTimeLabel(item.time_label) : ""].filter(Boolean).join("  "),
+      })),
+      ...(security?.news || dashboard?.latest_events || []).slice(0, 2).map((item) => ({
+        title: item.title || item.theme || "市场事件",
+        summary: item.summary || item.agent_reason || "暂无摘要",
+        meta: [item.source || "Market", formatTimeLabel(item.publish_time)].filter(Boolean).join("  "),
+      })),
+    ];
+    return hybrid.slice(0, 4);
+  }, [citations, dashboard?.latest_events, deskSource, security?.news]);
+
+  const historyTags = unique([...memory.recent_symbols, ...memory.recent_sectors, ...memory.preference_tags]).slice(0, 8);
+  const okProviders = (health?.providers || []).filter((item) => item.ok).length;
+  const controlHint = useMemo(() => {
+    if (deskSource === "market") return "优先使用实时行情、事件流和技术指标。";
+    if (deskSource === "knowledge") return "优先使用私有资料、引用证据和历史记忆。";
+    return "混合模式会同时调取行情与知识库证据。";
+  }, [deskSource]);
+
   if (!token || !user) {
     return <AuthScreen mode={authMode} busy={authBusy} error={authError} onSwitch={setAuthMode} onLogin={handleLogin} onRegister={handleRegister} />;
   }
 
-  const securityPath = chartPath(security?.history || []);
-  const securitySvgPath = securityPath.join(" ");
-
   return (
-    <div className="app-shell">
-      <header className="topbar panel">
-        <div>
-          <p className="section-kicker">FinAvatar Enterprise Desk</p>
-          <h1>金融数字人分析工作台</h1>
-        </div>
-        <div className="topbar-meta">
-          <button className={`nav-chip ${task === "dashboard" ? "active" : ""}`} type="button" onClick={() => setTask("dashboard")}>
-            市场总览
-          </button>
-          <button className={`nav-chip ${task === "auto" ? "active" : ""}`} type="button" onClick={() => setTask("auto")}>
-            智能问答
-          </button>
-          <button className={`nav-chip ${task === "library" ? "active" : ""}`} type="button" onClick={() => setTask("library")}>
-            资料管理
-          </button>
-          <span className={`status-pill ${agentState === "warn" ? "status-warn" : agentState === "loading" ? "status-loading" : "status-good"}`}>{agentTitle}</span>
-          <span className="status-pill status-neutral">{analysisMode}</span>
-          <button className="button ghost" type="button" onClick={() => void logout()}>
-            退出
-          </button>
-        </div>
-      </header>
-
-      <div className="workspace-grid">
+    <div className="terminal-shell">
+      <div className="terminal-grid">
         <aside className="sidebar-column">
-          <AvatarPanel
-            profile={avatarProfile}
-            voiceEnabled={avatarVoiceEnabled}
-            agentTitle={agentTitle}
-            agentCaption={agentCaption}
-            routeBadge={routeBadge}
-            runtimeState={agentState}
-            lastAssistantMessage={lastAssistantMessage}
-            onTranscript={(text) => void submitMessage(text)}
-            onToggleVoice={() => setAvatarVoiceEnabled((current) => !current)}
-            onSaveProfile={async (nextProfile) => {
-              const saved = await api.saveAvatarProfile(nextProfile);
-              setAvatarProfile(saved);
-            }}
-          />
-
-          <section className="panel">
-            <div className="panel-heading">
+          <section className="panel brand-panel">
+            <div className="brand-lockup">
+              <div className="brand-mark">FA</div>
               <div>
-                <p className="section-kicker">Copilot Control</p>
-                <h2>分析参数</h2>
+                <p className="eyebrow">Bloomberg-grade Desk</p>
+                <h2>FinAvatar Terminal</h2>
               </div>
             </div>
-            <div className="form-grid two-col">
-              <label className="field">
-                <span>分析风格</span>
-                <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
-                  <option value="professional">专业分析</option>
-                  <option value="summary">简洁摘要</option>
-                  <option value="teaching">教学解释</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>模型</span>
-                <select value={modelProvider} onChange={(event) => setModelProvider(event.target.value)}>
-                  {(models.length ? models : [{ id: "deepseek", label: "DeepSeek" }]).map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="toolbar-row">
-              <button className="button secondary" type="button" onClick={() => void refreshCoreData()}>
-                刷新总览
-              </button>
-              <button className="button ghost" type="button" onClick={() => void api.recordEvent("switch_module", `切换到 ${TASK_LABELS[task]}`, { task_type: task })}>
-                记录动作
-              </button>
+            <p className="muted-copy">Dark / Minimal / Professional / Data-driven / Premium</p>
+            <div className="desk-switch">
+              <button className={`switch-pill ${task !== "library" ? "active" : ""}`} type="button" onClick={() => setTask("dashboard")}>Desk</button>
+              <button className={`switch-pill ${task === "library" ? "active" : ""}`} type="button" onClick={() => setTask("library")}>Library</button>
             </div>
           </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Investor Profile</p>
-                <h2>用户画像</h2>
-              </div>
-              <button className="button ghost" type="button" onClick={() => void saveProfile()}>
-                保存画像
-              </button>
+          <section className="panel control-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">Control Center</p><h3>参数控制</h3></div>
+              <StatusBadge state={agentState} />
             </div>
-            <div className="form-grid two-col">
+            <div className="form-grid">
               <label className="field">
-                <span>风险偏好</span>
+                <span>模型选择</span>
+                <select value={modelProvider} onChange={(event) => setModelProvider(event.target.value)}>
+                  {(models.length ? models : [{ id: "deepseek", label: "DeepSeek" }]).map((item) => (
+                    <option key={item.id} value={item.id}>{item.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>分析模式</span>
+                <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value as AnalysisMode)}>
+                  <option value="professional">Professional</option>
+                  <option value="summary">Summary</option>
+                  <option value="teaching">Teaching</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>数据源</span>
+                <select value={deskSource} onChange={(event) => setDeskSource(event.target.value as DeskSource)}>
+                  <option value="hybrid">Hybrid</option>
+                  <option value="market">Market</option>
+                  <option value="knowledge">Knowledge</option>
+                </select>
+              </label>
+            </div>
+            <p className="control-caption">{controlHint}</p>
+          </section>
+
+          <section className="panel profile-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">Investor Lens</p><h3>风险画像</h3></div>
+              <button className="button ghost" type="button" onClick={() => void saveProfile()}>保存</button>
+            </div>
+            <div className="form-grid compact-grid">
+              <label className="field">
+                <span>风险等级</span>
                 <select value={profile.risk_level} onChange={(event) => setProfile((current) => ({ ...current, risk_level: event.target.value as UserProfile["risk_level"] }))}>
-                  <option value="low">稳健</option>
-                  <option value="medium">均衡</option>
-                  <option value="high">积极</option>
+                  <option value="low">低风险</option>
+                  <option value="medium">中风险</option>
+                  <option value="high">高风险</option>
                 </select>
               </label>
               <label className="field">
@@ -833,329 +1013,39 @@ export default function App() {
                   <option value="long">长期</option>
                 </select>
               </label>
-              <label className="field full-span">
-                <span>关注市场</span>
-                <input value={joinTags(profile.markets)} onChange={(event) => setProfile((current) => ({ ...current, markets: splitTags(event.target.value) }))} />
-              </label>
-              <label className="field full-span">
-                <span>偏好方向</span>
-                <input value={joinTags(profile.sector_preferences)} onChange={(event) => setProfile((current) => ({ ...current, sector_preferences: splitTags(event.target.value) }))} />
-              </label>
+              <label className="field full-span"><span>关注市场</span><input value={joinTags(profile.markets)} onChange={(event) => setProfile((current) => ({ ...current, markets: splitTags(event.target.value) }))} /></label>
+              <label className="field full-span"><span>偏好赛道</span><input value={joinTags(profile.sector_preferences)} onChange={(event) => setProfile((current) => ({ ...current, sector_preferences: splitTags(event.target.value) }))} /></label>
             </div>
           </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Private Vault</p>
-                <h2>知识库资料</h2>
-              </div>
-              <span className="status-pill status-neutral">已上传 {libraryCount} 份</span>
+          <section className="panel ingest-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">Private Research</p><h3>资料注入</h3></div>
+              <span className="tv-tag">{libraryCount} docs</span>
             </div>
             <form className="form-grid" onSubmit={(event) => void uploadFiles(event)}>
-              <label className="field">
-                <span>上传文档</span>
-                <input type="file" name="files" multiple accept=".txt,.md,.pdf,.docx,.csv,.json,.html,.htm,.xlsx" />
-              </label>
-              <div className="toolbar-row">
-                <button className="button primary" type="submit">写入私有知识库</button>
-                <button className="button ghost" type="button" onClick={() => setTask("library")}>进入资料管理</button>
+              <label className="field"><span>上传资料</span><input type="file" name="files" multiple accept=".txt,.md,.pdf,.docx,.csv,.json,.html,.htm,.xlsx" /></label>
+              <div className="button-row">
+                <button className="button primary" type="submit">写入知识库</button>
+                <button className="button secondary" type="button" onClick={() => setTask("library")}>打开资料库</button>
               </div>
             </form>
+          </section>
+
+          <section className="panel user-panel">
+            <div className="user-chip">
+              <div className="mini-avatar">{initialsOf(avatarProfile?.display_name || user.display_name || user.username)}</div>
+              <div className="user-chip-meta">
+                <strong>{avatarProfile?.display_name || user.display_name || user.username}</strong>
+                <span>{agentState === "loading" ? "分析中" : agentState === "warn" ? "需要注意" : "在线"}</span>
+              </div>
+              <button className="voice-toggle" type="button" onClick={() => setAvatarVoiceEnabled((current) => !current)}>{avatarVoiceEnabled ? "Voice On" : "Voice Off"}</button>
+            </div>
           </section>
         </aside>
 
         <main className="main-column">
-          <section className="panel briefing-panel">
-            <div>
-              <p className="section-kicker">Desk Status</p>
-              <h2>{agentTitle}</h2>
-              <p className="muted-copy">{agentCaption}</p>
-            </div>
-            <div className="pill-row">
-              <span className="status-pill status-neutral">用户 {user.display_name || user.username}</span>
-              <span className="status-pill status-neutral">路由 {routeBadge}</span>
-              <span className="status-pill status-neutral">模式 {analysisMode}</span>
-            </div>
-          </section>
-
-          {task === "dashboard" ? (
-            <>
-              <section className="panel">
-                <div className="panel-heading">
-                  <div>
-                    <p className="section-kicker">Security Focus</p>
-                    <h2>个股深挖</h2>
-                  </div>
-                </div>
-                <div className="toolbar-row">
-                  <input className="hero-search" value={securityQuery} onChange={(event) => setSecurityQuery(event.target.value)} placeholder="输入股票代码或名称，例如 600519 / 贵州茅台" />
-                  <button className="button primary" type="button" onClick={() => void queryStock(securityQuery)} disabled={securityBusy}>
-                    {securityBusy ? "查询中..." : "查询个股"}
-                  </button>
-                </div>
-                {security ? (
-                  <div className="security-shell">
-                    <div className="security-summary-card">
-                      <div>
-                        <h3>{security.quote?.name || security.profile?.company_name || security.quote?.symbol || "个股详情"}</h3>
-                        <div className="pill-row compact">
-                          <span className="status-pill status-neutral">{security.quote?.symbol || "--"}</span>
-                          <span className="status-pill status-neutral">{security.profile?.sector || "待补充行业"}</span>
-                          <span className="status-pill status-neutral">{security.profile?.industry || "待补充分组"}</span>
-                        </div>
-                      </div>
-                      <div className="security-price-block">
-                        <strong className={toneClass(security.quote?.change_percent)}>{num(security.quote?.last_price)}</strong>
-                        <span className={toneClass(security.quote?.change_percent)}>{pct(security.quote?.change_percent)}</span>
-                      </div>
-                    </div>
-                    <div className="security-grid">
-                      <article className="subpanel">
-                        <div className="subpanel-head">
-                          <h3>走势概览</h3>
-                          <span className="muted-copy">近 {security.history?.length || 0} 个交易日</span>
-                        </div>
-                        {securitySvgPath ? (
-                          <svg className="line-chart" viewBox="0 0 640 220" preserveAspectRatio="none">
-                            <defs>
-                              <linearGradient id="securityGradient" x1="0" x2="0" y1="0" y2="1">
-                                <stop offset="0%" stopColor="rgba(77, 211, 194, 0.38)" />
-                                <stop offset="100%" stopColor="rgba(77, 211, 194, 0.04)" />
-                              </linearGradient>
-                            </defs>
-                            <path d={`${securitySvgPath} L 640 220 L 0 220 Z`} fill="url(#securityGradient)" />
-                            <path d={securitySvgPath} fill="none" stroke="#4dd3c2" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        ) : (
-                          <div className="empty-state">暂无 K 线历史数据。</div>
-                        )}
-                      </article>
-
-                      <article className="subpanel">
-                        <div className="subpanel-head">
-                          <h3>关键数据</h3>
-                        </div>
-                        <div className="metrics-grid compact-grid">
-                          <Metric label="成交额" value={turnover(security.quote?.turnover)} />
-                          <Metric label="换手率" value={pct(security.quote?.turnover_rate)} />
-                          <Metric label="振幅" value={pct(security.quote?.amplitude)} />
-                          <Metric label="PE / PB" value={`${num(security.profile?.pe)} / ${num(security.profile?.pb)}`} />
-                          <Metric label="ROE / 负债率" value={`${pct(security.profile?.roe)} / ${pct(security.profile?.debt_ratio)}`} />
-                          <Metric label="主力资金" value={turnover(security.capital_flow?.main_net_inflow)} />
-                        </div>
-                        <p className="muted-copy">{security.capital_flow?.summary || "暂无资金流摘要。"}</p>
-                        <div className="pill-row compact">
-                          <span className="status-pill status-neutral">RSI14 {num(security.technical?.rsi14)}</span>
-                          <span className="status-pill status-neutral">MA5 {num(security.technical?.ma5)}</span>
-                          <span className="status-pill status-neutral">MA20 {num(security.technical?.ma20)}</span>
-                          <span className="status-pill status-neutral">趋势 {security.technical?.momentum_label || "--"}</span>
-                        </div>
-                      </article>
-                    </div>
-                    <article className="subpanel">
-                      <div className="subpanel-head">
-                        <h3>重点事件</h3>
-                      </div>
-                      <div className="list-stack">
-                        {(security.news || []).length ? (
-                          security.news?.map((item, index) => (
-                            <div className="list-card" key={`${item.title || "news"}-${index}`}>
-                              <div className="card-topline">
-                                <strong>{item.title || "未命名事件"}</strong>
-                                <span className="status-pill status-neutral">{item.theme || item.event_type || "事件"}</span>
-                              </div>
-                              <p>{item.summary || "--"}</p>
-                              <div className="pill-row compact">
-                                <span className="status-pill status-neutral">{item.source || "--"}</span>
-                                <span className="status-pill status-neutral">{formatTimeLabel(item.publish_time)}</span>
-                              </div>
-                              {item.agent_reason ? <p className="muted-copy">{item.agent_reason}</p> : null}
-                            </div>
-                          ))
-                        ) : (
-                          <div className="empty-state">暂无可用热点事件。</div>
-                        )}
-                      </div>
-                    </article>
-                  </div>
-                ) : (
-                  <div className="empty-state">输入一只 A 股，系统会返回详细数据、资金流、热点事件和 K 线概览。</div>
-                )}
-              </section>
-
-              <section className="panel">
-                <div className="panel-heading">
-                  <div>
-                    <p className="section-kicker">Market Overview</p>
-                    <h2>实时市场总览</h2>
-                  </div>
-                </div>
-                <div className="metrics-grid">
-                  {(dashboard?.indices || []).length ? (
-                    dashboard?.indices.map((item) => (
-                      <article className="metric-tile" key={item.name}>
-                        <span>{item.name}</span>
-                        <strong>{num(item.last_price)}</strong>
-                        <em className={toneClass(item.change_percent)}>{pct(item.change_percent)}</em>
-                        <small>成交额 {turnover(item.turnover)}</small>
-                      </article>
-                    ))
-                  ) : (
-                    <div className="empty-state">暂无指数数据。</div>
-                  )}
-                </div>
-                <div className="insight-grid three-up">
-                  <article className="subpanel">
-                    <div className="subpanel-head"><h3>市场风格</h3></div>
-                    <strong>{dashboard?.market_sentiment?.regime || "--"}</strong>
-                    <p>{dashboard?.market_sentiment?.summary || "暂无情绪摘要。"}</p>
-                  </article>
-                  <ListPanel title="热门板块" items={dashboard?.hot_sectors || []} onSelect={(value) => void queryStock(String(value.symbol || value.name || ""))} />
-                  <ListPanel title="热门 ETF" items={dashboard?.hot_etfs || []} onSelect={() => undefined} />
-                  <ListPanel title="涨幅居前" items={dashboard?.top_gainers || []} onSelect={(value) => void queryStock(String(value.symbol || ""))} />
-                  <ListPanel title="成交额领先" items={dashboard?.top_turnover || []} onSelect={(value) => void queryStock(String(value.symbol || ""))} />
-                  <article className="subpanel events-panel">
-                    <div className="subpanel-head"><h3>重点事件</h3></div>
-                    <div className="list-stack">
-                      {(dashboard?.latest_events || []).length ? (
-                        dashboard?.latest_events.map((item, index) => (
-                          <div className="list-card" key={`${item.title}-${index}`}>
-                            <div className="card-topline">
-                              <strong>{item.title}</strong>
-                              <span className="status-pill status-neutral">{item.theme || item.event_type || "事件"}</span>
-                            </div>
-                            <p>{item.summary || "--"}</p>
-                            <div className="pill-row compact">
-                              <span className="status-pill status-neutral">{item.source || "--"}</span>
-                              <span className="status-pill status-neutral">{formatTimeLabel(item.publish_time)}</span>
-                              <span className="status-pill status-neutral">评分 {num(item.importance_score, 1)}</span>
-                            </div>
-                            {item.agent_reason ? <p className="muted-copy">Agent 筛选理由：{item.agent_reason}</p> : null}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="empty-state">暂无热点事件。</div>
-                      )}
-                    </div>
-                  </article>
-                </div>
-              </section>
-            </>
-          ) : task === "auto" ? (
-            <>
-              <section className="panel composer-panel">
-                <div className="panel-heading">
-                  <div>
-                    <p className="section-kicker">Conversation</p>
-                    <h2>{conversationTitle}</h2>
-                  </div>
-                  <div className="toolbar-row">
-                    <button className="button secondary" type="button" onClick={() => void createConversation(true)}>
-                      新对话
-                    </button>
-                    <button className="button ghost" type="button" onClick={() => void removeConversation()}>
-                      删除对话
-                    </button>
-                  </div>
-                </div>
-                <div className="quick-prompt-row">
-                  {QUICK_PROMPTS.map((prompt) => (
-                    <button className="prompt-chip" key={prompt} type="button" onClick={() => void submitMessage(prompt)}>
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-                <div className="message-stream">
-                  {messages.length ? (
-                    messages.map((message) => (
-                      <article key={message.message_id} className={`message-card ${message.role}`}>
-                        <div className="message-head">{message.role === "user" ? "USER" : "FINAVATAR"}</div>
-                        <MarkdownBlock text={message.content || (message.role === "assistant" ? "正在生成..." : "")} />
-                      </article>
-                    ))
-                  ) : (
-                    <div className="empty-state">这是一个新对话，可以直接开始提问。</div>
-                  )}
-                </div>
-                <form className="composer-row" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
-                  <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：结合我最近的偏好，今天还有哪些 A 股值得继续跟踪？" rows={4} />
-                  <div className="toolbar-row align-end">
-                    <button className="button ghost" type="button" onClick={() => controllerRef.current?.abort()} disabled={!streaming}>
-                      停止生成
-                    </button>
-                    <button className="button primary" type="submit" disabled={streaming}>
-                      {streaming ? "分析中..." : "发起分析"}
-                    </button>
-                  </div>
-                </form>
-              </section>
-
-              <section className="analysis-layout">
-                <article className="panel">
-                  <div className="panel-heading">
-                    <div>
-                      <p className="section-kicker">Structured Output</p>
-                      <h2>{summaryTitle}</h2>
-                    </div>
-                  </div>
-                  <p className="muted-copy">{summaryText}</p>
-                  <ul className="bullet-list">
-                    {summaryBullets.length ? summaryBullets.map((item) => <li key={item}>{item}</li>) : <li>等待结构化摘要。</li>}
-                  </ul>
-                  <div className="analysis-card-grid">
-                    {cards.length ? (
-                      cards.map((card, index) => (
-                        <article className="analysis-card" key={`${card.title || card.card_type || "card"}-${index}`}>
-                          <p className="section-kicker">{card.card_type || "分析卡"}</p>
-                          <h3>{card.title || "分析"}</h3>
-                          <p>{card.summary || "--"}</p>
-                          {card.items?.length ? (
-                            <ul className="bullet-list">
-                              {card.items.map((item) => (
-                                <li key={item}>{item}</li>
-                              ))}
-                            </ul>
-                          ) : null}
-                        </article>
-                      ))
-                    ) : (
-                      <div className="empty-state">暂无结构化分析卡片。</div>
-                    )}
-                  </div>
-                </article>
-
-                <article className="panel">
-                  <div className="panel-heading">
-                    <div>
-                      <p className="section-kicker">Evidence & Risk</p>
-                      <h2>引用与风险</h2>
-                    </div>
-                  </div>
-                  <div className="risk-strip">
-                    <strong>风险提示</strong>
-                    <ul className="bullet-list">
-                      {riskItems.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="list-stack">
-                    {citations.length ? (
-                      citations.map((item, index) => (
-                        <div className="list-card" key={`${item.title || "citation"}-${index}`}>
-                          <strong>{item.title || "证据"}</strong>
-                          <p className="muted-copy">{item.section_title || "未分节"}{item.time_label ? ` · ${formatTimeLabel(item.time_label)}` : ""}</p>
-                          <p>{item.preview || "--"}</p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="empty-state">本次回答没有引用到私有知识库证据。</div>
-                    )}
-                  </div>
-                </article>
-              </section>            </>
-          ) : (
+          {task === "library" ? (
             <LibraryWorkspace
               files={libraryFiles}
               search={librarySearch}
@@ -1168,143 +1058,237 @@ export default function App() {
               onRefresh={() => { void refreshLibrary(); }}
               onDeleteDocument={(docId) => { void deleteLibraryDocument(docId); }}
             />
+          ) : (
+            <>
+              <section className="panel asset-panel">
+                <div className="asset-panel-top">
+                  <div>
+                    <p className="eyebrow">Asset Focus</p>
+                    <h2>{displayedSecurityName}</h2>
+                    <div className="asset-meta-row">
+                      <span className="tv-tag strong">{displayedTicker}</span>
+                      <span className="tv-tag">{MODE_LABELS[analysisMode]}</span>
+                      <span className="tv-tag">{SOURCE_LABELS[deskSource]}</span>
+                    </div>
+                  </div>
+                  <div className="asset-search-row">
+                    <input className="hero-search" value={securityQuery} onChange={(event) => setSecurityQuery(event.target.value)} placeholder="输入股票名称或代码，例如：600519 / 贵州茅台" />
+                    <button className="button primary" type="button" onClick={() => void queryStock(securityQuery)} disabled={securityBusy}>{securityBusy ? "加载中..." : "查询"}</button>
+                  </div>
+                </div>
+
+                <div className="asset-panel-body">
+                  <div className="price-cluster">
+                    {securityBusy && !security ? (
+                      <>
+                        <SkeletonBlock className="skeleton-price" />
+                        <SkeletonBlock className="skeleton-line short" />
+                      </>
+                    ) : (
+                      <>
+                        <strong className={`asset-price ${toneClass(displayedChange)}`}>{num(displayedPrice)}</strong>
+                        <span className={`asset-change ${toneClass(displayedChange)}`}>{pct(displayedChange)}</span>
+                        <small>Route: {routeBadge}</small>
+                      </>
+                    )}
+                  </div>
+                  <div className="sparkline-panel">
+                    {securityBusy && !sparkValues.length ? <SkeletonBlock className="skeleton-chart" /> : <TrendMiniChart values={sparkValues} tone={Number(displayedChange) >= 0 ? "rise" : "fall"} />}
+                  </div>
+                </div>
+
+                <div className="market-ribbon">
+                  {(dashboard?.indices || []).slice(0, 4).map((item) => (
+                    <article className="market-chip" key={item.name}>
+                      <span>{item.name}</span>
+                      <strong>{num(item.last_price)}</strong>
+                      <em className={toneClass(item.change_percent)}>{pct(item.change_percent)}</em>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section className="analysis-grid">
+                <article className="panel analysis-panel">
+                  <div className="section-head">
+                    <div><p className="eyebrow">AI Investment Analysis</p><h3>{displayedSummaryTitle}</h3></div>
+                    <span className="analysis-mode-tag">{MODE_LABELS[analysisMode]}</span>
+                  </div>
+
+                  <div className="conclusion-card">
+                    <span className="eyebrow">Conclusion</span>
+                    <p>{displayedSummaryText}</p>
+                  </div>
+
+                  <div className="analysis-bullets">
+                    {displayedBullets.length ? displayedBullets.map((item) => (
+                      <div className="bullet-row" key={item}><i /><span>{item}</span></div>
+                    )) : <div className="empty-state">等待新的结构化结论。</div>}
+                  </div>
+
+                  <div className="insight-metric-grid">
+                    <InsightMetric label="当前价格" value={num(security?.quote?.last_price)} tone={toneClass(security?.quote?.change_percent)} note={pct(security?.quote?.change_percent)} />
+                    <InsightMetric label="PE / PB" value={`${num(security?.profile?.pe)} / ${num(security?.profile?.pb)}`} note={security?.profile?.sector || "Valuation"} />
+                    <InsightMetric label="ROE" value={pct(security?.profile?.roe)} note={security?.profile?.industry || "Profitability"} />
+                    <InsightMetric label="主力资金" value={turnover(security?.capital_flow?.main_net_inflow)} note={security?.capital_flow?.trend_label || "Capital Flow"} />
+                    <InsightMetric label="市场风格" value={dashboard?.market_sentiment?.regime || "--"} note="Market Regime" />
+                    <InsightMetric label="证据覆盖" value={`${citations.length || 0}`} note="Citations" />
+                  </div>
+
+                  <div className="progress-grid">
+                    <ProgressMeter label="RSI" value={rsiScore} note={`RSI14 ${num(security?.technical?.rsi14)}`} tone="positive" />
+                    <ProgressMeter label="Risk Score" value={riskScore} note="基于波动、振幅与债务结构估算" tone="risk" />
+                    <ProgressMeter label="Liquidity" value={liquidityScore} note="成交额与换手率强度" tone="positive" />
+                    <ProgressMeter label="Confidence" value={confidenceScore} note="结构化卡片与证据覆盖度" tone="neutral" />
+                  </div>
+
+                  <div className="risk-card">
+                    <div className="section-head tight"><div><p className="eyebrow">Risk Alert</p><h4>风险提示</h4></div></div>
+                    <div className="risk-list">
+                      {displayedRisks.length ? displayedRisks.map((item) => (
+                        <div className="risk-row" key={item}><i /><span>{item}</span></div>
+                      )) : <div className="empty-state">暂无风险提示。</div>}
+                    </div>
+                  </div>
+                </article>
+
+                <article className="panel context-panel">
+                  <div className="section-head">
+                    <div><p className="eyebrow">Market Context</p><h3>辅助信息</h3></div>
+                    <button className="button ghost" type="button" onClick={() => void refreshCoreData()}>刷新</button>
+                  </div>
+
+                  <TagCluster title="TradingView-style Tags" items={keyTags} emptyLabel="等待标签" />
+
+                  <div className="context-block">
+                    <div className="section-head tight"><h4>Reference Flow</h4></div>
+                    <div className="reference-list">
+                      {referenceItems.length ? referenceItems.map((item) => (
+                        <article className="reference-card" key={`${item.title}-${item.meta}`}>
+                          <strong>{item.title}</strong>
+                          <p>{item.summary}</p>
+                          <small>{item.meta}</small>
+                        </article>
+                      )) : <div className="empty-state">暂无辅助引用。</div>}
+                    </div>
+                  </div>
+
+                  <div className="context-block">
+                    <div className="section-head tight"><h4>Market Breadth</h4></div>
+                    <div className="breadth-list">
+                      {(dashboard?.top_gainers || []).slice(0, 4).map((item, index) => (
+                        <button className="breadth-row" key={`${String(item.symbol || item.name || index)}`} type="button" onClick={() => void queryStock(String(item.symbol || item.name || ""))}>
+                          <span>{String(item.name || item.symbol || "--")}</span>
+                          <strong className={toneClass(Number(item.change_percent ?? item.daily_change ?? 0))}>{pct(Number(item.change_percent ?? item.daily_change ?? 0))}</strong>
+                        </button>
+                      ))}
+                      {!dashboard?.top_gainers?.length ? <div className="empty-state">暂无盘面热度数据。</div> : null}
+                    </div>
+                  </div>
+                </article>
+              </section>
+
+              <section className="panel chat-panel">
+                <div className="section-head">
+                  <div><p className="eyebrow">Conversation</p><h3>{conversationTitle}</h3></div>
+                  <div className="button-row">
+                    <button className="button secondary" type="button" onClick={() => void createConversation(true)}>新会话</button>
+                    <button className="button ghost" type="button" onClick={() => void removeConversation()}>删除</button>
+                  </div>
+                </div>
+
+                <div className="quick-prompt-row">
+                  {QUICK_PROMPTS.map((prompt) => (
+                    <button className="prompt-chip" key={prompt} type="button" onClick={() => void submitMessage(prompt)}>{prompt}</button>
+                  ))}
+                </div>
+
+                <div className="message-stream terminal-messages" ref={messageStreamRef}>
+                  {messages.length ? messages.map((message) => (
+                    <article key={message.message_id} className={`message-card ${message.role}`}>
+                      <div className="message-meta"><span>{message.role === "user" ? "USER" : "FINAVATAR"}</span><small>{formatTimeLabel(message.created_at)}</small></div>
+                      <MarkdownBlock text={message.content || (message.role === "assistant" ? "正在生成..." : "")} />
+                    </article>
+                  )) : <div className="empty-state">从这里开始新的投研对话，系统会保留上下文并实时流式输出。</div>}
+                </div>
+
+                <form className="composer-row" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
+                  <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="例如：围绕当前关注标的，给我一份偏专业风格的买卖观察和风险提示。" rows={4} />
+                  <div className="button-row align-end">
+                    <button className="button ghost" type="button" onClick={() => controllerRef.current?.abort()} disabled={!streaming}>停止</button>
+                    <button className="button primary" type="submit" disabled={streaming}>{streaming ? "分析中..." : "发送分析"}</button>
+                  </div>
+                </form>
+              </section>
+            </>
           )}
         </main>
 
         <aside className="right-column">
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Conversation Navigator</p>
-                <h2>会话历史</h2>
-              </div>
+          <section className="panel side-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">Session History</p><h3>会话历史</h3></div>
+              <button className="button ghost small" type="button" onClick={() => setHistoryCollapsed((current) => !current)}>{historyCollapsed ? "展开" : "折叠"}</button>
             </div>
-            <div className="list-stack">
-              {conversations.length ? (
-                conversations.map((item) => (
+            {!historyCollapsed ? (
+              <div className="history-list">
+                {conversations.length ? conversations.map((item) => (
                   <button className={`conversation-item ${item.conversation_id === activeConversationId ? "active" : ""}`} key={item.conversation_id} type="button" onClick={() => void loadConversation(item.conversation_id)}>
-                    <strong>{item.title || "新对话"}</strong>
+                    <strong>{item.title || "新会话"}</strong>
                     <p>{item.last_message_preview || "暂无消息"}</p>
                     <span>{item.message_count || 0} 条消息</span>
                   </button>
-                ))
-              ) : (
-                <div className="empty-state">还没有历史对话。</div>
-              )}
-            </div>
+                )) : <div className="empty-state">暂无历史会话。</div>}
+              </div>
+            ) : null}
           </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Agent Memory</p>
-                <h2>长期记忆</h2>
-              </div>
+          <section className="panel side-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">AI Memory</p><h3>记忆标签</h3></div>
+              <span className="tv-tag">{formatTimeLabel(memory.updated_at)}</span>
             </div>
             <p className="muted-copy">{memory.summary}</p>
-            <TagRow label="偏好标签" items={memory.preference_tags} />
-            <TagRow label="最近关注股票" items={memory.recent_symbols} />
-            <TagRow label="最近关注板块" items={memory.recent_sectors} />
-            <div className="subpanel mini-panel">
-              <strong>最近动作</strong>
-              <ul className="bullet-list">
-                {memory.recent_actions.length ? memory.recent_actions.map((item) => <li key={item}>{item}</li>) : <li>暂无记录</li>}
-              </ul>
-            </div>
+            <TagCluster title="Memory Tags" items={historyTags} emptyLabel="等待记忆沉淀" />
           </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Runtime Health</p>
-                <h2>链路状态</h2>
-              </div>
+          <section className="panel side-panel">
+            <div className="section-head">
+              <div><p className="eyebrow">System Status</p><h3>系统状态</h3></div>
+              <span className="tv-tag strong">{okProviders}/{health?.providers?.length || 0} providers</span>
             </div>
-            <div className="list-stack">
-              {(health?.providers || []).length ? (
-                health?.providers.map((item) => (
-                  <div className={`provider-card ${item.ok ? "ok" : "fail"}`} key={item.provider}>
-                    <div className="card-topline">
-                      <strong>{item.provider}</strong>
-                      <span>{item.ok ? "可用" : "降级"}</span>
-                    </div>
-                    <p className="muted-copy">延迟 {item.latency_ms ?? "--"} ms</p>
-                    {item.error ? <p className="muted-copy">{item.error}</p> : null}
-                  </div>
-                ))
-              ) : (
-                <div className="empty-state">尚未检测。</div>
-              )}
-            </div>
-          </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">Execution Trace</p>
-                <h2>运行状态</h2>
+            <div className="status-icon-grid">
+              <article className="status-icon-card"><span className="status-icon">MD</span><strong>{SOURCE_LABELS[deskSource]}</strong><small>当前数据源焦点</small></article>
+              <article className="status-icon-card"><span className="status-icon">RT</span><strong>{streaming ? "Streaming" : "Standby"}</strong><small>会话流状态</small></article>
+              <article className="status-icon-card"><span className="status-icon">KB</span><strong>{libraryCount}</strong><small>知识库文档</small></article>
+            </div>
+
+            <div className="provider-stack">
+              {(health?.providers || []).length ? health?.providers.map((item) => (
+                <div className={`provider-card ${item.ok ? "ok" : "fail"}`} key={item.provider}>
+                  <div className="provider-head"><strong>{item.provider}</strong><span>{item.ok ? "OK" : "WARN"}</span></div>
+                  <small>Latency {item.latency_ms ?? "--"} ms</small>
+                  {item.error ? <p>{item.error}</p> : null}
+                </div>
+              )) : <div className="empty-state">暂无 provider 健康数据。</div>}
+            </div>
+
+            <div className="trace-block">
+              <div className="section-head tight"><h4>Execution Trace</h4></div>
+              <div className="trace-list">
+                {statusItems.map((item, index) => (
+                  <div className="trace-row" key={`${item}-${index}`}><i /><span>{item}</span></div>
+                ))}
               </div>
             </div>
-            <ul className="bullet-list status-list">
-              {statusItems.map((item, index) => (
-                <li key={`${item}-${index}`}>{item}</li>
-              ))}
-            </ul>
+            <div className="button-row">
+              <button className="button secondary" type="button" onClick={() => void refreshCoreData()}>刷新系统</button>
+              <button className="button ghost" type="button" onClick={() => void logout()}>退出</button>
+            </div>
           </section>
         </aside>
       </div>
     </div>
   );
 }
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="metric-tile mini">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function TagRow({ label, items }: { label: string; items: string[] }) {
-  return (
-    <div className="tag-row-block">
-      <strong>{label}</strong>
-      <div className="pill-row compact">
-        {items.length ? items.map((item) => <span className="status-pill status-neutral" key={item}>{item}</span>) : <span className="status-pill status-neutral">暂无</span>}
-      </div>
-    </div>
-  );
-}
-
-function ListPanel(props: {
-  title: string;
-  items: Array<Record<string, unknown>>;
-  onSelect: (item: Record<string, unknown>) => void;
-}) {
-  return (
-    <article className="subpanel">
-      <div className="subpanel-head"><h3>{props.title}</h3></div>
-      <div className="list-stack">
-        {props.items.length ? (
-          props.items.map((item, index) => (
-            <button className="list-card selectable" key={`${props.title}-${String(item.name || item.symbol || index)}`} type="button" onClick={() => props.onSelect(item)}>
-              <div className="card-topline">
-                <strong>{String(item.name || item.sector || item.fund_name || item.symbol || "--")}</strong>
-                <span className={toneClass(Number(item.change_percent ?? item.daily_change ?? 0))}>{pct(Number(item.change_percent ?? item.daily_change ?? 0))}</span>
-              </div>
-              <div className="pill-row compact">
-                {item.symbol ? <span className="status-pill status-neutral">{String(item.symbol)}</span> : null}
-                {item.turnover ? <span className="status-pill status-neutral">成交额 {turnover(Number(item.turnover))}</span> : null}
-                {item.leader_name ? <span className="status-pill status-neutral">龙头 {String(item.leader_name)}</span> : null}
-              </div>
-            </button>
-          ))
-        ) : (
-          <div className="empty-state">暂无数据。</div>
-        )}
-      </div>
-    </article>
-  );
-}
-
