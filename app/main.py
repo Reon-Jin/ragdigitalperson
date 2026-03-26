@@ -18,28 +18,34 @@ from app.config import get_settings
 from app.knowledge_base.finance_store import FinanceKnowledgeBase
 from app.knowledge_base.finance_sync import FinanceSyncService
 from app.knowledge_base.profile_store import ProfileStore
+from app.rag.service import build_rag_service
 from app.schemas import (
+    ChatRetrieveRequest,
+    ChatRetrieveResponse,
     DocumentDetail,
     FileItem,
+    IngestionJobItem,
     LibraryCatalogItem,
     ModelProviderItem,
     PageDetail,
+    SearchRequest,
+    SearchResponse,
+    SearchResultItem,
     SectionDetail,
     UpdateChunkRequest,
     UpdateDocumentRequest,
+    UploadQueuedItem,
+    UploadQueuedResponse,
     UploadResponse,
 )
 from app.services.deepseek_client import CompatibleLLMClient
 from app.services.mysql_document_store import DocumentStore, SUPPORTED_SUFFIXES
-from app.services.library_manager import LibraryManager
-from app.services.metadata_service import MetadataService
 
 
 settings = get_settings()
 document_store = DocumentStore(settings)
+rug_service = build_rag_service()
 llm_client = CompatibleLLMClient(settings)
-metadata_service = MetadataService(settings, llm_client)
-library_manager = LibraryManager(document_store, metadata_service)
 finance_kb = FinanceKnowledgeBase(settings)
 finance_sync = FinanceSyncService(finance_kb, document_store)
 profile_store = ProfileStore(settings)
@@ -58,6 +64,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
 app.state.container = container
 app.state.avatar_service = avatar_service
+app.state.rag_service = rug_service
 app.include_router(v2_router)
 app.state.finance_sync_status = {"started": False, "done": False, "error": None}
 
@@ -128,11 +135,13 @@ async def health() -> dict:
             ),
         },
         "rag": {
-            "documents": len(document_store.docs),
+            "documents": len(document_store.list_files()),
             "sections": len(document_store.sections),
             "chunks": len(document_store.chunks),
             "supported_formats": sorted(SUPPORTED_SUFFIXES),
             "embedding_dimensions": settings.embedding_dimensions,
+            "qdrant_collection": settings.qdrant_collection,
+            "reranker_enabled": settings.reranker_enabled,
         },
         "finance_kb": finance_kb.stats(),
         "finance_sync": app.state.finance_sync_status,
@@ -216,37 +225,108 @@ async def get_section(doc_id: str, section_id: str, request: Request) -> Section
     return SectionDetail(**section)
 
 
-@app.post("/api/upload", response_model=UploadResponse)
-async def upload_files(
+async def _queue_uploads(
     request: Request,
     files: list[UploadFile] = File(...),
     model_provider: str = Form(settings.default_model_provider),
-) -> UploadResponse:
+) -> UploadQueuedResponse:
     user = require_current_user(request)
-    temp_paths: list[Path] = []
-    normalized_provider = llm_client.normalize_provider(model_provider)
+    queued_items: list[UploadQueuedItem] = []
+    skipped: list[str] = []
 
     for upload in files:
         original_name = Path(upload.filename or "file").name
         suffix = Path(original_name).suffix.lower()
+        if suffix not in SUPPORTED_SUFFIXES:
+            skipped.append(original_name)
+            continue
         fd, temp_name = tempfile.mkstemp(suffix=suffix or ".tmp")
         with open(fd, "wb", closefd=True) as tmp:
             tmp.write(await upload.read())
         temp_path = Path(temp_name)
         renamed = temp_path.with_name(f"{temp_path.stem}--{original_name}")
         temp_path.replace(renamed)
-        temp_paths.append(renamed)
+        try:
+            result = rug_service.queue_upload(temp_path=renamed, filename=original_name, user_id=user.user_id)
+        except Exception as exc:
+            log_runtime_exception("queue_upload", exc)
+            renamed.unlink(missing_ok=True)
+            skipped.append(original_name)
+            continue
+        queued_items.append(
+            UploadQueuedItem(
+                file_id=result["doc"]["doc_id"],
+                job_id=result["job"]["job_id"],
+                filename=original_name,
+                status=result["job"]["status"],
+                stage=result["job"]["stage"],
+            )
+        )
+    return UploadQueuedResponse(items=queued_items, skipped=skipped)
 
-    try:
-        result = await library_manager.add_files(temp_paths, model_provider=normalized_provider, user_id=user.user_id)
-    except Exception as exc:
-        log_runtime_exception("upload_files", exc)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        for temp_path in temp_paths:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
-    return UploadResponse(**result)
+@app.post("/api/upload", response_model=UploadQueuedResponse)
+async def upload_files(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    model_provider: str = Form(settings.default_model_provider),
+) -> UploadQueuedResponse:
+    return await _queue_uploads(request, files=files, model_provider=model_provider)
+
+
+@app.post("/files/upload", response_model=UploadQueuedResponse)
+async def upload_files_v2(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    model_provider: str = Form(settings.default_model_provider),
+) -> UploadQueuedResponse:
+    return await _queue_uploads(request, files=files, model_provider=model_provider)
+
+
+@app.get("/jobs/{job_id}", response_model=IngestionJobItem)
+async def get_job(job_id: str, request: Request) -> IngestionJobItem:
+    user = require_current_user(request)
+    job = rug_service.get_job(job_id, user.user_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return IngestionJobItem(**job)
+
+
+@app.get("/documents", response_model=list[FileItem])
+async def list_documents_v2(request: Request) -> list[FileItem]:
+    user = require_current_user(request)
+    return [FileItem(**item) for item in rug_service.list_documents(user.user_id)]
+
+
+@app.get("/documents/{doc_id}", response_model=DocumentDetail)
+async def get_document_v2(doc_id: str, request: Request) -> DocumentDetail:
+    user = require_current_user(request)
+    document = rug_service.get_document(doc_id, user.user_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return DocumentDetail(**document)
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document_v2(doc_id: str, request: Request) -> dict:
+    user = require_current_user(request)
+    deleted = rug_service.delete_document(doc_id, user.user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return {"deleted": True, "doc_id": doc_id}
+
+
+@app.post("/search", response_model=SearchResponse)
+async def semantic_search(payload: SearchRequest, request: Request) -> SearchResponse:
+    user = require_current_user(request)
+    results = rug_service.search(payload.query, user_id=user.user_id, doc_id=payload.doc_id)
+    items = [SearchResultItem(**item) for item in results[: payload.top_k]]
+    return SearchResponse(query=payload.query, total=len(items), items=items)
+
+
+@app.post("/chat/retrieve", response_model=ChatRetrieveResponse)
+async def chat_retrieve(payload: ChatRetrieveRequest, request: Request) -> ChatRetrieveResponse:
+    user = require_current_user(request)
+    results = rug_service.search(payload.query, user_id=user.user_id, doc_id=payload.doc_id)
+    items = [SearchResultItem(**item) for item in results[: payload.top_k]]
+    return ChatRetrieveResponse(query=payload.query, chunks=items)

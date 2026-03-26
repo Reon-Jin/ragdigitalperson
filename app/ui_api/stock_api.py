@@ -7,8 +7,8 @@ from typing import Any, Awaitable
 from app.config import Settings
 from app.market_data.schemas.news import MarketEvent
 from app.market_data.schemas.profile import SecurityProfile
-from app.market_data.schemas.quote import CapitalFlowSnapshot, TechnicalSnapshot
-from app.market_data.schemas.screening import StockAnalysisResponse
+from app.market_data.schemas.quote import CapitalFlowSnapshot, PriceCandle, TechnicalSnapshot
+from app.market_data.schemas.screening import PeriodPerformance, StockAnalysisResponse
 from app.market_data.service.fundamentals_service import FundamentalsService
 from app.market_data.service.news_curator import MarketNewsCurator
 from app.market_data.service.news_service import NewsService
@@ -56,7 +56,7 @@ class StockAPI:
                 default=[],
             ),
             self._fallback_after_timeout(
-                self.quote_service.get_history(symbol, market=market, limit=60),
+                self.quote_service.get_history(symbol, market=market, limit=260),
                 timeout=self.settings.market_analysis_history_timeout_seconds,
                 default=[],
             ),
@@ -69,9 +69,11 @@ class StockAPI:
 
         profile = self._merge_quote_identity(profile, quote.name)
         curated_news = self.news_curator.curate(news, limit=5, focus_symbol=symbol)
+        period_performance = self._build_period_performance(history, quote)
         turnover_billion = round((quote.turnover or 0) / 100000000, 2)
         highlights = [
             f"当前涨跌幅 {quote.change_percent or 0:.2f}%，成交额约 {turnover_billion:.2f} 亿元，适合先看量价是否延续。",
+            self._performance_highlight(period_performance),
             f"{profile.company_name} 所属 {profile.sector or '待补充'} / {profile.industry or '待补充'}，估值约 PE {profile.pe or 0:.2f}、PB {profile.pb or 0:.2f}。",
             f"盈利能力参考 ROE {profile.roe or 0:.2f}%，若后续财报验证不及预期，短线情绪可能回落。",
             capital_flow.summary,
@@ -89,6 +91,7 @@ class StockAPI:
             history=history,
             capital_flow=capital_flow,
             news=curated_news,
+            period_performance=period_performance,
             highlights=highlights,
             risks=risks,
         )
@@ -126,3 +129,58 @@ class StockAPI:
         if profile.company_name and not profile.company_name.startswith("模拟标的"):
             return profile
         return profile.model_copy(update={"company_name": quote_name})
+
+    def _build_period_performance(self, history: list[PriceCandle], quote) -> dict[str, PeriodPerformance]:
+        result: dict[str, PeriodPerformance] = {}
+        today_date = str(quote.timestamp or "")[:10] or None
+        result["today"] = PeriodPerformance(
+            label="今日",
+            days=0,
+            change_percent=quote.change_percent,
+            start_date=today_date,
+            end_date=today_date,
+            start_close=quote.prev_close,
+            end_close=quote.last_price,
+            high=quote.high,
+            low=quote.low,
+            summary=f"今日涨跌幅 {quote.change_percent or 0:.2f}%，最新价 {quote.last_price or 0:.2f}。",
+        )
+        for key, label, days in (("1d", "近1个交易日", 1), ("1w", "近1周", 5), ("1m", "近1月", 20), ("1y", "近1年", 240)):
+            item = self._period_from_history(history, label=label, days=days)
+            if item is not None:
+                result[key] = item
+        return result
+
+    def _period_from_history(self, history: list[PriceCandle], *, label: str, days: int) -> PeriodPerformance | None:
+        if len(history) <= days:
+            return None
+        start = history[-days - 1]
+        end = history[-1]
+        start_close = start.close if start.close is not None else start.open
+        end_close = end.close if end.close is not None else end.open
+        if start_close in (None, 0) or end_close is None:
+            return None
+        change_percent = round((float(end_close) - float(start_close)) / float(start_close) * 100, 2)
+        high_values = [item.high for item in history[-days:] if item.high is not None]
+        low_values = [item.low for item in history[-days:] if item.low is not None]
+        return PeriodPerformance(
+            label=label,
+            days=days,
+            change_percent=change_percent,
+            start_date=start.timestamp,
+            end_date=end.timestamp,
+            start_close=start_close,
+            end_close=end_close,
+            high=max(high_values) if high_values else None,
+            low=min(low_values) if low_values else None,
+            summary=f"{label}区间涨跌幅 {change_percent:.2f}%，区间收盘 {float(end_close):.2f}。",
+        )
+
+    def _performance_highlight(self, period_performance: dict[str, PeriodPerformance]) -> str:
+        pieces: list[str] = []
+        for key in ("1d", "1w", "1m", "1y"):
+            item = period_performance.get(key)
+            if item is None or item.change_percent is None:
+                continue
+            pieces.append(f"{item.label} {item.change_percent:.2f}%")
+        return "，".join(pieces[:4]) if pieces else "历史区间表现暂不可用。"

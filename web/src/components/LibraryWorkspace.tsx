@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import { formatTimeLabel } from "../lib/format";
-import type { DocumentDetail, LibraryFileItem, PageDetail } from "../types";
+import type { DocumentDetail, IngestionJob, LibraryFileItem, PageDetail } from "../types";
 
 type LibraryTab = "preview" | "chunks" | "pages";
 
@@ -64,6 +64,7 @@ export function LibraryWorkspace(props: {
   selectedDocument: DocumentDetail | null;
   detailBusy: boolean;
   deletingDocId: string;
+  jobs: IngestionJob[];
   onSearchChange: (value: string) => void;
   onSelectDocument: (docId: string) => void;
   onRefresh: () => void;
@@ -73,6 +74,8 @@ export function LibraryWorkspace(props: {
   const [activeTab, setActiveTab] = useState<LibraryTab>("preview");
   const [activeChunkId, setActiveChunkId] = useState("");
   const [activePageNumber, setActivePageNumber] = useState(1);
+
+  const jobsByDocId = useMemo(() => new Map(props.jobs.map((item) => [item.doc_id, item])), [props.jobs]);
 
   const filteredFiles = useMemo(() => {
     const keyword = deferredSearch.trim().toLowerCase();
@@ -135,6 +138,7 @@ export function LibraryWorkspace(props: {
             {filteredFiles.length ? (
               filteredFiles.map((item) => {
                 const active = item.doc_id === props.selectedDocumentId;
+                const job = jobsByDocId.get(item.doc_id);
                 return (
                   <button
                     className={`list-card selectable library-doc-card ${active ? "active" : ""}`}
@@ -144,7 +148,7 @@ export function LibraryWorkspace(props: {
                   >
                     <div className="card-topline">
                       <strong>{item.title || item.filename}</strong>
-                      <span className="status-pill status-neutral">{suffixLabel(item.suffix)}</span>
+                      <span className="status-pill status-neutral">{job ? `${job.stage} ${Math.round(job.progress * 100)}%` : suffixLabel(item.suffix)}</span>
                     </div>
                     <p className="muted-copy">{item.filename}</p>
                     <p>{item.summary || "暂无摘要。"}</p>

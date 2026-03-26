@@ -62,6 +62,19 @@ class DashboardOverview(BaseModel):
     latest_events: list[MarketEvent] = Field(default_factory=list)
 
 
+class PeriodPerformance(BaseModel):
+    label: str
+    days: int
+    change_percent: float | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    start_close: float | None = None
+    end_close: float | None = None
+    high: float | None = None
+    low: float | None = None
+    summary: str = ""
+
+
 class StockAnalysisResponse(BaseModel):
     quote: QuoteSnapshot
     technical: TechnicalSnapshot | None = None
@@ -69,5 +82,6 @@ class StockAnalysisResponse(BaseModel):
     history: list[PriceCandle] = Field(default_factory=list)
     capital_flow: CapitalFlowSnapshot | None = None
     news: list[MarketEvent] = Field(default_factory=list)
+    period_performance: dict[str, PeriodPerformance] = Field(default_factory=dict)
     highlights: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)

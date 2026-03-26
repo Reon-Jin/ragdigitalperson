@@ -67,6 +67,31 @@ class Settings(BaseModel):
     static_dir: Path = BASE_DIR / "static"
     database_url: str = Field(default_factory=_default_database_url)
     embedding_dimensions: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSIONS", "512")))
+    qdrant_location: str = Field(default_factory=lambda: os.getenv("QDRANT_LOCATION", "local"))
+    qdrant_path: Path = BASE_DIR / "data" / "qdrant"
+    qdrant_url: str = Field(default_factory=lambda: os.getenv("QDRANT_URL", "").strip())
+    qdrant_api_key: str = Field(default_factory=lambda: os.getenv("QDRANT_API_KEY", "").strip())
+    qdrant_collection: str = Field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "rag_chunks"))
+    redis_url: str = Field(default_factory=lambda: os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0").strip())
+    celery_enabled: bool = Field(default_factory=lambda: _env_bool("CELERY_ENABLED", False))
+    celery_always_eager: bool = Field(default_factory=lambda: _env_bool("CELERY_ALWAYS_EAGER", False))
+    local_task_workers: int = Field(default_factory=lambda: int(os.getenv("LOCAL_TASK_WORKERS", "2")))
+    embedding_model_name: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3"))
+    reranker_model_name: str = Field(default_factory=lambda: os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-m3"))
+    tokenizer_name: str = Field(default_factory=lambda: os.getenv("TOKENIZER_NAME", os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")))
+    embedding_device: str = Field(default_factory=lambda: os.getenv("EMBEDDING_DEVICE", "auto"))
+    reranker_device: str = Field(default_factory=lambda: os.getenv("RERANKER_DEVICE", "auto"))
+    embedding_batch_size: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_BATCH_SIZE", "16")))
+    reranker_batch_size: int = Field(default_factory=lambda: int(os.getenv("RERANKER_BATCH_SIZE", "8")))
+    extraction_workers: int = Field(default_factory=lambda: int(os.getenv("EXTRACTION_WORKERS", "4")))
+    chunk_size_tokens: int = Field(default_factory=lambda: int(os.getenv("CHUNK_SIZE_TOKENS", "600")))
+    chunk_overlap_tokens: int = Field(default_factory=lambda: int(os.getenv("CHUNK_OVERLAP_TOKENS", "120")))
+    retrieval_top_k: int = Field(default_factory=lambda: int(os.getenv("RETRIEVAL_TOP_K", "30")))
+    answer_top_k: int = Field(default_factory=lambda: int(os.getenv("ANSWER_TOP_K", "6")))
+    rerank_top_n: int = Field(default_factory=lambda: int(os.getenv("RERANK_TOP_N", "8")))
+    reranker_enabled: bool = Field(default_factory=lambda: _env_bool("RERANKER_ENABLED", True))
+    ingestion_batch_size: int = Field(default_factory=lambda: int(os.getenv("INGESTION_BATCH_SIZE", "64")))
+    upload_max_mb: int = Field(default_factory=lambda: int(os.getenv("UPLOAD_MAX_MB", "200")))
 
     chunk_size: int = 900
     chunk_overlap: int = 120
@@ -131,4 +156,5 @@ def get_settings() -> Settings:
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.static_dir.mkdir(parents=True, exist_ok=True)
+    settings.qdrant_path.mkdir(parents=True, exist_ok=True)
     return settings

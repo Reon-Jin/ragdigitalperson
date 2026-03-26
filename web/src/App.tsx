@@ -1,4 +1,4 @@
-﻿import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { TrendMiniChart } from "./components/TrendMiniChart";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
@@ -18,6 +18,7 @@ import type {
   DashboardOverview,
   DocumentDetail,
   HealthPayload,
+  IngestionJob,
   LibraryFileItem,
   LocalAvatarProfile,
   ModelItem,
@@ -308,6 +309,7 @@ export default function App() {
   const [selectedLibraryDoc, setSelectedLibraryDoc] = useState<DocumentDetail | null>(null);
   const [libraryDetailBusy, setLibraryDetailBusy] = useState(false);
   const [libraryDeletingDocId, setLibraryDeletingDocId] = useState("");
+  const [ingestionJobs, setIngestionJobs] = useState<IngestionJob[]>([]);
   const [securityQuery, setSecurityQuery] = useState("");
   const [security, setSecurity] = useState<SecurityPayload | null>(null);
   const [securityBusy, setSecurityBusy] = useState(false);
@@ -429,6 +431,32 @@ export default function App() {
     return files;
   }, [api, loadLibraryDocument, selectedLibraryDocId]);
 
+  const pollIngestionJobs = useCallback(async (jobIds: string[]) => {
+    if (!jobIds.length) return;
+    let active = [...jobIds];
+    while (active.length) {
+      const snapshots = await Promise.all(active.map((jobId) => api.getJob(jobId)));
+      setIngestionJobs((current) => {
+        const merged = new Map(current.map((item) => [item.job_id, item]));
+        snapshots.forEach((item) => merged.set(item.job_id, item));
+        return Array.from(merged.values()).sort((a, b) => b.created_at.localeCompare(a.created_at));
+      });
+      const pending = snapshots.filter((item) => !['completed', 'failed'].includes(item.status));
+      if (!pending.length) {
+        await refreshLibrary();
+        const failed = snapshots.filter((item) => item.status === 'failed');
+        if (failed.length) {
+          setAgent('warn', 'Ingestion Finished With Errors', failed[0].error_message || 'Some documents failed to ingest.');
+        } else {
+          setAgent('idle', 'Vault Updated', 'Documents are ready for semantic retrieval.');
+        }
+        break;
+      }
+      active = pending.map((item) => item.job_id);
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+  }, [api, refreshLibrary, setAgent]);
+
   const refreshCoreData = useCallback(async () => {
     const results = await Promise.allSettled([
       api.dashboard(),
@@ -527,19 +555,27 @@ export default function App() {
     Array.from(input.files).forEach((file) => body.append("files", file));
     body.append("model_provider", modelProvider || "deepseek");
 
-    setAgent("loading", "Syncing Research", "正在写入私有知识库。");
+    setAgent("loading", "Queueing Research", "Upload accepted and queued for background ingestion.");
     try {
       const result = await api.upload(body);
       input.value = "";
-      const preferredDocId = result.added[0]?.doc_id;
-      const [, memorySnapshot] = await Promise.all([refreshLibrary(preferredDocId), api.memory()]);
+      const jobIds = result.items.map((item) => item.job_id);
+      if (result.items.length) {
+        setTask("library");
+        await refreshLibrary();
+        void pollIngestionJobs(jobIds);
+      }
+      const memorySnapshot = await api.memory();
       setMemory(memorySnapshot);
-      if (preferredDocId) setTask("library");
-      setAgent("idle", "Vault Updated", preferredDocId ? "资料已入库，已切换到资料视图。" : "上传完成。");
+      if (!result.items.length && result.skipped.length) {
+        setAgent("warn", "Upload Skipped", `Skipped: ${result.skipped.join(" / ")}`);
+      } else {
+        setAgent("loading", "Ingestion Running", `Queued ${result.items.length} file(s) for background ingestion.`);
+      }
     } catch (error) {
-      setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "上传失败。");
+      setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "Upload failed.");
     }
-  }, [api, modelProvider, refreshLibrary, setAgent]);
+  }, [api, modelProvider, pollIngestionJobs, refreshLibrary, setAgent]);
 
   const saveProfile = useCallback(async () => {
     try {
@@ -1053,6 +1089,7 @@ export default function App() {
               selectedDocument={selectedLibraryDoc}
               detailBusy={libraryDetailBusy}
               deletingDocId={libraryDeletingDocId}
+              jobs={ingestionJobs}
               onSearchChange={setLibrarySearch}
               onSelectDocument={(docId) => { void loadLibraryDocument(docId); }}
               onRefresh={() => { void refreshLibrary(); }}

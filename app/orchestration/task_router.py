@@ -12,6 +12,19 @@ class TaskRouter:
     _RECOMMENDATION_TERMS = ("买什么", "推荐", "值得关注", "候选", "高股息", "红利", "该买哪只", "关注哪些")
     _SCREENING_TERMS = ("筛选", "筛一筛", "有哪些", "哪几只", "适合")
     _SECTOR_TERMS = ("板块", "行业", "轮动", "热点", "为什么上涨", "哪个板块更强", "为什么更强")
+    _MARKET_OVERVIEW_TERMS = (
+        "股市整体",
+        "整体情况",
+        "市场整体",
+        "大盘怎么样",
+        "今天大盘",
+        "今天股市",
+        "盘面怎么样",
+        "盘面情况",
+        "市场情绪",
+        "两市表现",
+        "指数表现",
+    )
     _RAG_TERMS = ("财报", "公告", "研报", "政策", "概念", "是什么", "为什么", "怎么理解", "怎么看", "风险", "逻辑")
     _FOLLOWUP_STOCK_TERMS = (
         "这只",
@@ -78,6 +91,16 @@ class TaskRouter:
                 sector=sector,
                 needs_market_data=False,
                 needs_rag=False,
+            )
+
+        if any(term in message for term in self._MARKET_OVERVIEW_TERMS):
+            return V2RouteDecision(
+                task_type="sector_rotation_analysis",
+                reason="识别为大盘整体或盘面总览问题",
+                company=company,
+                sector=sector,
+                needs_market_data=True,
+                needs_rag=True,
             )
 
         # If the user clearly mentions a single A-share stock, always resolve it

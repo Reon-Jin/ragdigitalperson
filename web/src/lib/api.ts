@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   AgentMemory,
   AnalysisMode,
   AuthResponse,
@@ -7,6 +7,7 @@
   DashboardOverview,
   DocumentDetail,
   HealthPayload,
+  IngestionJob,
   LibraryFileItem,
   LocalAvatarProfile,
   ModelItem,
@@ -82,12 +83,13 @@ export function createApi(getToken: () => string, onUnauthorized: () => void) {
       request<LocalAvatarProfile>("/api/v2/avatar/profile", { method: "PUT", body: JSON.stringify(payload) }),
     dashboard: (): Promise<DashboardOverview> => request<DashboardOverview>("/api/v2/dashboard/overview"),
     health: (): Promise<HealthPayload> => request<HealthPayload>("/api/v2/health/market"),
-    files: (): Promise<LibraryFileItem[]> => request<LibraryFileItem[]>("/api/files"),
+    files: (): Promise<LibraryFileItem[]> => request<LibraryFileItem[]>("/documents"),
     getLibraryDocument: (docId: string): Promise<DocumentDetail> =>
-      request<DocumentDetail>(`/api/library/${encodeURIComponent(docId)}`),
+      request<DocumentDetail>(`/documents/${encodeURIComponent(docId)}`),
     deleteLibraryDocument: (docId: string): Promise<{ deleted: boolean; doc_id: string }> =>
-      request<{ deleted: boolean; doc_id: string }>(`/api/library/${encodeURIComponent(docId)}`, { method: "DELETE" }),
-    upload: (body: FormData): Promise<UploadResponse> => request<UploadResponse>("/api/upload", { method: "POST", body }),
+      request<{ deleted: boolean; doc_id: string }>(`/documents/${encodeURIComponent(docId)}`, { method: "DELETE" }),
+    upload: (body: FormData): Promise<UploadResponse> => request<UploadResponse>("/files/upload", { method: "POST", body }),
+    getJob: (jobId: string): Promise<IngestionJob> => request<IngestionJob>(`/jobs/${encodeURIComponent(jobId)}`),
     memory: (): Promise<AgentMemory> => request<AgentMemory>("/api/v2/agent/memory"),
     recordEvent: (eventType: string, summary: string, metadata: Record<string, unknown> = {}): Promise<AgentMemory> =>
       request<AgentMemory>("/api/v2/agent/events", {

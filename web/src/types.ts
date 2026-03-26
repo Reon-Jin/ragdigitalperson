@@ -1,4 +1,4 @@
-﻿export type TaskType = "dashboard" | "auto" | "library";
+export type TaskType = "dashboard" | "auto" | "library";
 export type AnalysisMode = "summary" | "professional" | "teaching";
 export type ModelProvider = "deepseek" | "qwen" | "mimo" | "ollama";
 export type MessageRole = "user" | "assistant";
@@ -177,11 +177,37 @@ export interface LibraryFileItem {
   section_count: number;
   summary: string;
   keywords: string[];
+  status: string;
+}
+
+export interface UploadQueuedItem {
+  file_id: string;
+  job_id: string;
+  filename: string;
+  status: string;
+  stage: string;
 }
 
 export interface UploadResponse {
-  added: LibraryFileItem[];
+  items: UploadQueuedItem[];
   skipped: string[];
+}
+
+export interface IngestionJob {
+  job_id: string;
+  doc_id: string;
+  user_id: string;
+  filename: string;
+  status: string;
+  stage: string;
+  progress: number;
+  message: string;
+  error_message?: string | null;
+  retry_count: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ChunkPreview {
@@ -228,6 +254,24 @@ export interface DocumentDetail extends LibraryFileItem {
   sections: SectionSummary[];
   chunks: ChunkDetail[];
   pages: PageDetail[];
+}
+
+export interface SearchResultItem {
+  doc_id: string;
+  filename: string;
+  category: string;
+  title: string;
+  section_id: string;
+  section_title: string;
+  chunk_id: string;
+  chunk_index: number;
+  chunk_title: string;
+  score: number;
+  text: string;
+  page_start?: number | null;
+  page_end?: number | null;
+  chunk_kind: string;
+  metadata: Record<string, unknown>;
 }
 
 export interface ConversationMessage {

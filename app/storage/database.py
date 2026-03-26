@@ -334,6 +334,9 @@ class Database:
                 title VARCHAR(255) NOT NULL,
                 suffix VARCHAR(20) NOT NULL,
                 uploaded_at VARCHAR(40) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                source_type VARCHAR(32) NOT NULL DEFAULT 'upload',
+                file_size BIGINT NOT NULL DEFAULT 0,
                 chunk_count INTEGER NOT NULL,
                 section_count INTEGER NOT NULL,
                 page_count INTEGER NOT NULL,
@@ -341,6 +344,44 @@ class Database:
                 headings_json LONGTEXT NOT NULL,
                 keywords_json LONGTEXT NOT NULL,
                 embedding_json LONGTEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS ingestion_jobs (
+                job_id VARCHAR(64) PRIMARY KEY,
+                doc_id VARCHAR(64) NOT NULL,
+                user_id VARCHAR(64) NOT NULL,
+                filename VARCHAR(255) NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                stage VARCHAR(32) NOT NULL,
+                progress FLOAT NOT NULL DEFAULT 0,
+                message VARCHAR(255) NOT NULL DEFAULT '',
+                error_message LONGTEXT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                started_at VARCHAR(40) NULL,
+                completed_at VARCHAR(40) NULL,
+                created_at VARCHAR(40) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS chunk_metadata (
+                chunk_id VARCHAR(64) PRIMARY KEY,
+                doc_id VARCHAR(64) NOT NULL,
+                user_id VARCHAR(64) NOT NULL,
+                filename VARCHAR(255) NOT NULL,
+                section_title VARCHAR(255) NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_kind VARCHAR(40) NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                text LONGTEXT NOT NULL,
+                preview TEXT NOT NULL,
+                page_start INTEGER NULL,
+                page_end INTEGER NULL,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                char_start INTEGER NOT NULL DEFAULT 0,
+                char_end INTEGER NOT NULL DEFAULT 0,
+                created_at VARCHAR(40) NOT NULL
             )
             """,
             """
@@ -429,8 +470,17 @@ class Database:
         ]
         for statement in statements:
             self.execute(statement)
+        self.ensure_column("documents", "status", "VARCHAR(32) NOT NULL DEFAULT 'queued'")
+        self.ensure_column("documents", "source_type", "VARCHAR(32) NOT NULL DEFAULT 'upload'")
+        self.ensure_column("documents", "file_size", "BIGINT NOT NULL DEFAULT 0")
         self._ensure_index("idx_user_sessions_user", "user_sessions", "user_id")
         self._ensure_index("idx_documents_user", "documents", "user_id")
+        self._ensure_index("idx_documents_status", "documents", "status")
+        self._ensure_index("idx_ingestion_jobs_doc", "ingestion_jobs", "doc_id")
+        self._ensure_index("idx_ingestion_jobs_user", "ingestion_jobs", "user_id")
+        self._ensure_index("idx_ingestion_jobs_status", "ingestion_jobs", "status")
+        self._ensure_index("idx_chunk_metadata_doc", "chunk_metadata", "doc_id")
+        self._ensure_index("idx_chunk_metadata_user", "chunk_metadata", "user_id")
         self._ensure_index("idx_sections_doc", "document_sections", "doc_id")
         self._ensure_index("idx_sections_user", "document_sections", "user_id")
         self._ensure_index("idx_chunks_doc", "document_chunks", "doc_id")

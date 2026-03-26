@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 
-CategoryName = Literal["金融", "医学", "法律", "科技", "生活"]
+CategoryName = str
 EmotionName = Literal["neutral", "happy", "serious", "concerned", "energetic", "thinking"]
 ModelProviderName = Literal["deepseek", "qwen", "mimo", "ollama"]
 
@@ -67,11 +67,42 @@ class FileItem(BaseModel):
     section_count: int
     summary: str
     keywords: List[str] = Field(default_factory=list)
+    status: str = "queued"
 
 
 class UploadResponse(BaseModel):
     added: List[FileItem]
     skipped: List[str]
+
+
+class IngestionJobItem(BaseModel):
+    job_id: str
+    doc_id: str
+    user_id: str
+    filename: str
+    status: str
+    stage: str
+    progress: float
+    message: str = ""
+    error_message: str | None = None
+    retry_count: int = 0
+    started_at: str | None = None
+    completed_at: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class UploadQueuedItem(BaseModel):
+    file_id: str
+    job_id: str
+    filename: str
+    status: str
+    stage: str
+
+
+class UploadQueuedResponse(BaseModel):
+    items: List[UploadQueuedItem]
+    skipped: List[str] = Field(default_factory=list)
 
 
 class ChunkPreview(BaseModel):
@@ -108,6 +139,7 @@ class DocumentDetail(BaseModel):
     section_count: int
     summary: str
     keywords: List[str] = Field(default_factory=list)
+    status: str = "queued"
     headings: List[str]
     sections: List[SectionSummary]
     chunks: List["ChunkDetail"]
@@ -177,6 +209,47 @@ class UpdateDocumentRequest(BaseModel):
 
 class UpdateChunkRequest(BaseModel):
     chunk_title: str = Field(min_length=1, max_length=80)
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=30, ge=1, le=100)
+    doc_id: str | None = None
+
+
+class SearchResultItem(BaseModel):
+    doc_id: str
+    filename: str
+    category: str
+    title: str
+    section_id: str
+    section_title: str
+    chunk_id: str
+    chunk_index: int
+    chunk_title: str
+    score: float
+    text: str
+    page_start: int | None = None
+    page_end: int | None = None
+    chunk_kind: str = "text"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchResponse(BaseModel):
+    query: str
+    total: int
+    items: List[SearchResultItem]
+
+
+class ChatRetrieveRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=6, ge=1, le=20)
+    doc_id: str | None = None
+
+
+class ChatRetrieveResponse(BaseModel):
+    query: str
+    chunks: List[SearchResultItem]
 
 
 class ModelProviderItem(BaseModel):
