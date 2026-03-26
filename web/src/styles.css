@@ -1046,3 +1046,147 @@ textarea:focus { border-color: rgba(77, 211, 194, 0.5); }
 .avatar-panel-heading > div {
   padding-left: 4px;
 }
+
+.library-panel {
+  gap: 22px;
+}
+
+.library-toolbar {
+  align-items: end;
+}
+
+.library-search-wrap {
+  min-width: 280px;
+}
+
+.library-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 18px;
+  min-height: 720px;
+}
+
+.library-list-column,
+.library-detail-column {
+  min-width: 0;
+}
+
+.library-list-column {
+  border-right: 1px solid var(--line);
+  padding-right: 18px;
+}
+
+.library-list-stack,
+.library-nav-list,
+.library-section-list {
+  display: grid;
+  gap: 12px;
+}
+
+.library-doc-card,
+.library-nav-card,
+.library-section-card {
+  text-align: left;
+}
+
+.library-doc-card.active,
+.library-nav-card.active {
+  border-color: rgba(77, 211, 194, 0.46);
+  background: var(--panel-hover);
+}
+
+.library-detail-column {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.library-detail-hero {
+  display: grid;
+  gap: 16px;
+}
+
+.library-danger-button {
+  border-color: rgba(255, 133, 124, 0.3);
+  color: var(--danger);
+}
+
+.library-stat-grid,
+.library-preview-grid,
+.library-explorer-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.library-stat-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.library-preview-grid {
+  grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr);
+}
+
+.library-explorer-grid {
+  grid-template-columns: minmax(320px, 0.78fr) minmax(0, 1.22fr);
+}
+
+.library-meta-panel,
+.library-nav-panel {
+  align-content: start;
+}
+
+.library-tab-bar {
+  margin-top: -4px;
+}
+
+.library-active-view {
+  display: grid;
+  gap: 14px;
+}
+
+.library-text-preview {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.7;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(4, 10, 18, 0.78);
+  color: var(--text);
+}
+
+.library-chip-stack,
+.library-mini-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.library-section-card {
+  display: grid;
+  gap: 10px;
+}
+
+.library-nav-list {
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 1440px) {
+  .library-layout,
+  .library-preview-grid,
+  .library-explorer-grid,
+  .library-stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .library-list-column {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding-right: 0;
+    padding-bottom: 18px;
+  }
+}

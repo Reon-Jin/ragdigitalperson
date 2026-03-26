@@ -1,7 +1,8 @@
-﻿import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AvatarPanel } from "./components/AvatarPanel";
-import { createApi, ApiError } from "./lib/api";
+import { LibraryWorkspace } from "./components/LibraryWorkspace";
+import { createApi } from "./lib/api";
 import { formatTimeLabel, joinTags, num, pct, splitTags, toneClass, turnover } from "./lib/format";
 import { renderMarkdown } from "./lib/markdown";
 import { ACTIVE_CONV_KEY, AVATAR_VOICE_KEY, TOKEN_KEY } from "./lib/storage";
@@ -15,6 +16,8 @@ import type {
   ConversationSession,
   ConversationSummary,
   DashboardOverview,
+  DocumentDetail,
+  LibraryFileItem,
   LocalAvatarProfile,
   HealthPayload,
   ModelItem,
@@ -35,6 +38,7 @@ const MAX_HISTORY = 8;
 const TASK_LABELS: Record<TaskType, string> = {
   dashboard: "市场总览",
   auto: "智能问答",
+  library: "资料管理",
 };
 const QUICK_PROMPTS = [
   "结合我最近关注的方向，今天哪些 A 股值得继续跟踪？",
@@ -204,6 +208,12 @@ export default function App() {
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [memory, setMemory] = useState<AgentMemory>(EMPTY_MEMORY);
   const [libraryCount, setLibraryCount] = useState(0);
+  const [libraryFiles, setLibraryFiles] = useState<LibraryFileItem[]>([]);
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [selectedLibraryDocId, setSelectedLibraryDocId] = useState("");
+  const [selectedLibraryDoc, setSelectedLibraryDoc] = useState<DocumentDetail | null>(null);
+  const [libraryDetailBusy, setLibraryDetailBusy] = useState(false);
+  const [libraryDeletingDocId, setLibraryDeletingDocId] = useState("");
   const [securityQuery, setSecurityQuery] = useState("");
   const [security, setSecurity] = useState<SecurityPayload | null>(null);
   const [securityBusy, setSecurityBusy] = useState(false);
@@ -244,6 +254,10 @@ export default function App() {
     setCards([]);
     setCitations([]);
     setSecurity(null);
+    setLibraryFiles([]);
+    setLibrarySearch("");
+    setSelectedLibraryDocId("");
+    setSelectedLibraryDoc(null);
   }, []);
 
   const api = useMemo(() => createApi(() => token, handleUnauthorized), [handleUnauthorized, token]);
@@ -277,12 +291,54 @@ export default function App() {
     setStatusItems(["系统待命。"]);
   }, [applyCards]);
 
+  const loadLibraryDocument = useCallback(async (docId: string) => {
+    if (!docId) {
+      setSelectedLibraryDocId("");
+      setSelectedLibraryDoc(null);
+      return;
+    }
+    setSelectedLibraryDocId(docId);
+    setLibraryDetailBusy(true);
+    try {
+      const detail = await api.getLibraryDocument(docId);
+      setSelectedLibraryDoc(detail);
+    } catch (error) {
+      setSelectedLibraryDoc(null);
+      setAgent("warn", "资料加载失败", error instanceof Error ? error.message : "无法读取资料详情。");
+    } finally {
+      setLibraryDetailBusy(false);
+    }
+  }, [api, setAgent]);
+
+  const refreshLibrary = useCallback(async (preferredDocId?: string | null): Promise<LibraryFileItem[]> => {
+    const files = await api.files();
+    setLibraryFiles(files);
+    setLibraryCount(files.length);
+    if (!files.length) {
+      setSelectedLibraryDocId("");
+      setSelectedLibraryDoc(null);
+      return files;
+    }
+    const requestedId = preferredDocId === undefined ? selectedLibraryDocId : preferredDocId || "";
+    const nextId = requestedId && files.some((item) => item.doc_id === requestedId) ? requestedId : files[0].doc_id;
+    if (!nextId) {
+      setSelectedLibraryDocId("");
+      setSelectedLibraryDoc(null);
+      return files;
+    }
+    await loadLibraryDocument(nextId);
+    return files;
+  }, [api, loadLibraryDocument, selectedLibraryDocId]);
+
   const refreshCoreData = useCallback(async () => {
     const results = await Promise.allSettled([api.dashboard(), api.health(), api.memory(), api.files(), api.models(), api.profile(), api.avatarProfile()]);
     if (results[0].status === "fulfilled") setDashboard(results[0].value);
     if (results[1].status === "fulfilled") setHealth(results[1].value);
     if (results[2].status === "fulfilled") setMemory(results[2].value);
-    if (results[3].status === "fulfilled") setLibraryCount(results[3].value.length);
+    if (results[3].status === "fulfilled") {
+      setLibraryFiles(results[3].value);
+      setLibraryCount(results[3].value.length);
+    }
     if (results[4].status === "fulfilled") {
       const configuredModels = results[4].value.filter((item) => item.configured !== false);
       setModels(configuredModels);
@@ -362,16 +418,17 @@ export default function App() {
     body.append("model_provider", modelProvider || "deepseek");
     setAgent("loading", "上传资料中", "正在写入你的私有知识库。");
     try {
-      await api.upload(body);
+      const result = await api.upload(body);
       input.value = "";
-      const [files, memorySnapshot] = await Promise.all([api.files(), api.memory()]);
-      setLibraryCount(files.length);
+      const preferredDocId = result.added[0]?.doc_id;
+      const [, memorySnapshot] = await Promise.all([refreshLibrary(preferredDocId), api.memory()]);
       setMemory(memorySnapshot);
-      setAgent("idle", "资料已入库", "后续问答会优先引用你的私有资料。");
+      if (preferredDocId) setTask("library");
+      setAgent("idle", "资料已入库", preferredDocId ? "已切换到资料管理，可继续预览和核对分块。" : "后续问答会优先引用你的私有资料。");
     } catch (error) {
       setAgent("warn", "上传失败", error instanceof Error ? error.message : "上传失败。");
     }
-  }, [api, modelProvider, setAgent]);
+  }, [api, modelProvider, refreshLibrary, setAgent]);
 
   const saveProfile = useCallback(async () => {
     try {
@@ -535,6 +592,23 @@ export default function App() {
     await initConversations();
   }, [activeConversationId, api, initConversations]);
 
+  const deleteLibraryDocument = useCallback(async (docId: string) => {
+    if (!docId) return;
+    const current = libraryFiles.find((item) => item.doc_id === docId);
+    const confirmed = window.confirm(`确认删除资料「${current?.title || current?.filename || docId}」？这会同时删除原文件和知识库索引。`);
+    if (!confirmed) return;
+    setLibraryDeletingDocId(docId);
+    try {
+      await api.deleteLibraryDocument(docId);
+      await refreshLibrary(selectedLibraryDocId === docId ? "" : selectedLibraryDocId);
+      setAgent("idle", "资料已删除", "原始文件与知识库索引已同步移除。");
+    } catch (error) {
+      setAgent("warn", "删除失败", error instanceof Error ? error.message : "资料删除失败。");
+    } finally {
+      setLibraryDeletingDocId("");
+    }
+  }, [api, libraryFiles, refreshLibrary, selectedLibraryDocId, setAgent]);
+
   const logout = useCallback(async () => {
     if (controllerRef.current) controllerRef.current.abort();
     if (token) {
@@ -551,6 +625,22 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(AVATAR_VOICE_KEY, avatarVoiceEnabled ? "1" : "0");
   }, [avatarVoiceEnabled]);
+
+  useEffect(() => {
+    if (task !== "library" || libraryDetailBusy) return;
+    if (!libraryFiles.length) {
+      setSelectedLibraryDocId("");
+      setSelectedLibraryDoc(null);
+      return;
+    }
+    const hasSelected = selectedLibraryDocId && libraryFiles.some((item) => item.doc_id === selectedLibraryDocId);
+    if (selectedLibraryDoc && selectedLibraryDoc.doc_id === selectedLibraryDocId && hasSelected) {
+      return;
+    }
+    const nextId = hasSelected ? selectedLibraryDocId : libraryFiles[0].doc_id;
+    if (!nextId) return;
+    void loadLibraryDocument(nextId);
+  }, [libraryDetailBusy, libraryFiles, loadLibraryDocument, selectedLibraryDoc, selectedLibraryDocId, task]);
 
   useEffect(() => {
     let active = true;
@@ -649,6 +739,9 @@ export default function App() {
           </button>
           <button className={`nav-chip ${task === "auto" ? "active" : ""}`} type="button" onClick={() => setTask("auto")}>
             智能问答
+          </button>
+          <button className={`nav-chip ${task === "library" ? "active" : ""}`} type="button" onClick={() => setTask("library")}>
+            资料管理
           </button>
           <span className={`status-pill ${agentState === "warn" ? "status-warn" : agentState === "loading" ? "status-loading" : "status-good"}`}>{agentTitle}</span>
           <span className="status-pill status-neutral">{analysisMode}</span>
@@ -764,7 +857,10 @@ export default function App() {
                 <span>上传文档</span>
                 <input type="file" name="files" multiple accept=".txt,.md,.pdf,.docx,.csv,.json,.html,.htm,.xlsx" />
               </label>
-              <button className="button primary" type="submit">写入私有知识库</button>
+              <div className="toolbar-row">
+                <button className="button primary" type="submit">写入私有知识库</button>
+                <button className="button ghost" type="button" onClick={() => setTask("library")}>进入资料管理</button>
+              </div>
             </form>
           </section>
         </aside>
@@ -946,7 +1042,7 @@ export default function App() {
                 </div>
               </section>
             </>
-          ) : (
+          ) : task === "auto" ? (
             <>
               <section className="panel composer-panel">
                 <div className="panel-heading">
@@ -1058,8 +1154,20 @@ export default function App() {
                     )}
                   </div>
                 </article>
-              </section>
-            </>
+              </section>            </>
+          ) : (
+            <LibraryWorkspace
+              files={libraryFiles}
+              search={librarySearch}
+              selectedDocumentId={selectedLibraryDocId}
+              selectedDocument={selectedLibraryDoc}
+              detailBusy={libraryDetailBusy}
+              deletingDocId={libraryDeletingDocId}
+              onSearchChange={setLibrarySearch}
+              onSelectDocument={(docId) => { void loadLibraryDocument(docId); }}
+              onRefresh={() => { void refreshLibrary(); }}
+              onDeleteDocument={(docId) => { void deleteLibraryDocument(docId); }}
+            />
           )}
         </main>
 

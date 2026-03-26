@@ -1,4 +1,4 @@
-export type TaskType = "dashboard" | "auto";
+﻿export type TaskType = "dashboard" | "auto" | "library";
 export type AnalysisMode = "summary" | "professional" | "teaching";
 export type ModelProvider = "deepseek" | "qwen" | "mimo" | "ollama";
 export type MessageRole = "user" | "assistant";
@@ -164,6 +164,70 @@ export interface SecurityPayload {
   capital_flow?: CapitalFlowPayload;
   history?: HistoryPoint[];
   news?: NewsItem[];
+}
+
+export interface LibraryFileItem {
+  doc_id: string;
+  filename: string;
+  category: string;
+  title: string;
+  suffix: string;
+  uploaded_at: string;
+  chunk_count: number;
+  section_count: number;
+  summary: string;
+  keywords: string[];
+}
+
+export interface UploadResponse {
+  added: LibraryFileItem[];
+  skipped: string[];
+}
+
+export interface ChunkPreview {
+  chunk_id: string;
+  chunk_index: number;
+  chunk_title: string;
+  chunk_kind: string;
+  section_id: string;
+  section_title: string;
+  preview: string;
+  word_count: number;
+  page_start?: number | null;
+  page_end?: number | null;
+}
+
+export interface SectionSummary {
+  section_id: string;
+  doc_id: string;
+  title: string;
+  order: number;
+  summary: string;
+  chunk_count: number;
+  previews: ChunkPreview[];
+}
+
+export interface ChunkDetail extends ChunkPreview {
+  text: string;
+  char_start: number;
+  char_end: number;
+}
+
+export interface PageDetail {
+  doc_id: string;
+  page_number: number;
+  char_start: number;
+  char_end: number;
+  preview: string;
+  text: string;
+  chunks: ChunkPreview[];
+}
+
+export interface DocumentDetail extends LibraryFileItem {
+  headings: string[];
+  sections: SectionSummary[];
+  chunks: ChunkDetail[];
+  pages: PageDetail[];
 }
 
 export interface ConversationMessage {

@@ -1,16 +1,19 @@
-import type {
+﻿import type {
   AgentMemory,
   AnalysisMode,
   AuthResponse,
   ConversationSession,
   ConversationSummary,
   DashboardOverview,
+  DocumentDetail,
   HealthPayload,
+  LibraryFileItem,
   LocalAvatarProfile,
   ModelItem,
   SecurityPayload,
   SessionResponse,
   StreamEvent,
+  UploadResponse,
   UserProfile,
 } from "../types";
 
@@ -79,8 +82,12 @@ export function createApi(getToken: () => string, onUnauthorized: () => void) {
       request<LocalAvatarProfile>("/api/v2/avatar/profile", { method: "PUT", body: JSON.stringify(payload) }),
     dashboard: (): Promise<DashboardOverview> => request<DashboardOverview>("/api/v2/dashboard/overview"),
     health: (): Promise<HealthPayload> => request<HealthPayload>("/api/v2/health/market"),
-    files: (): Promise<Array<Record<string, unknown>>> => request<Array<Record<string, unknown>>>("/api/files"),
-    upload: (body: FormData): Promise<Record<string, unknown>> => request<Record<string, unknown>>("/api/upload", { method: "POST", body }),
+    files: (): Promise<LibraryFileItem[]> => request<LibraryFileItem[]>("/api/files"),
+    getLibraryDocument: (docId: string): Promise<DocumentDetail> =>
+      request<DocumentDetail>(`/api/library/${encodeURIComponent(docId)}`),
+    deleteLibraryDocument: (docId: string): Promise<{ deleted: boolean; doc_id: string }> =>
+      request<{ deleted: boolean; doc_id: string }>(`/api/library/${encodeURIComponent(docId)}`, { method: "DELETE" }),
+    upload: (body: FormData): Promise<UploadResponse> => request<UploadResponse>("/api/upload", { method: "POST", body }),
     memory: (): Promise<AgentMemory> => request<AgentMemory>("/api/v2/agent/memory"),
     recordEvent: (eventType: string, summary: string, metadata: Record<string, unknown> = {}): Promise<AgentMemory> =>
       request<AgentMemory>("/api/v2/agent/events", {
