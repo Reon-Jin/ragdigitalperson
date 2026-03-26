@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from functools import lru_cache
@@ -36,6 +36,13 @@ def _default_database_url() -> str:
         f"mysql://{quote_plus(mysql_user)}:{quote_plus(mysql_password)}"
         f"@{mysql_host}:{mysql_port}/{quote_plus(mysql_database)}?charset=utf8mb4"
     )
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Settings(BaseModel):
@@ -84,6 +91,8 @@ class Settings(BaseModel):
         "portfolio_assistant",
         "teaching_mode",
     )
+    finance_sync_on_startup: bool = Field(default_factory=lambda: _env_bool("FINANCE_SYNC_ON_STARTUP", False))
+    finance_sync_startup_delay_seconds: float = Field(default_factory=lambda: float(os.getenv("FINANCE_SYNC_STARTUP_DELAY_SECONDS", "0")))
     market_default_region: str = Field(default_factory=lambda: os.getenv("MARKET_DEFAULT_REGION", "CN"))
     market_quote_cache_ttl_seconds: int = Field(default_factory=lambda: int(os.getenv("MARKET_QUOTE_CACHE_TTL_SECONDS", "15")))
     market_board_cache_ttl_seconds: int = Field(default_factory=lambda: int(os.getenv("MARKET_BOARD_CACHE_TTL_SECONDS", "60")))
@@ -94,6 +103,10 @@ class Settings(BaseModel):
     market_provider_max_retries: int = Field(default_factory=lambda: int(os.getenv("MARKET_PROVIDER_MAX_RETRIES", "2")))
     market_provider_qps: int = Field(default_factory=lambda: int(os.getenv("MARKET_PROVIDER_QPS", "5")))
     market_provider_concurrency: int = Field(default_factory=lambda: int(os.getenv("MARKET_PROVIDER_CONCURRENCY", "4")))
+    market_health_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("MARKET_HEALTH_TIMEOUT_SECONDS", "0.25")))
+    market_analysis_quote_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("MARKET_ANALYSIS_QUOTE_TIMEOUT_SECONDS", "1.2")))
+    market_analysis_component_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("MARKET_ANALYSIS_COMPONENT_TIMEOUT_SECONDS", "1.0")))
+    market_analysis_history_timeout_seconds: float = Field(default_factory=lambda: float(os.getenv("MARKET_ANALYSIS_HISTORY_TIMEOUT_SECONDS", "1.4")))
     market_primary_quote_provider: str = Field(default_factory=lambda: os.getenv("MARKET_PRIMARY_QUOTE_PROVIDER", "chinafast"))
     market_primary_fund_provider: str = Field(default_factory=lambda: os.getenv("MARKET_PRIMARY_FUND_PROVIDER", "mock"))
     market_primary_news_provider: str = Field(default_factory=lambda: os.getenv("MARKET_PRIMARY_NEWS_PROVIDER", "akshare"))

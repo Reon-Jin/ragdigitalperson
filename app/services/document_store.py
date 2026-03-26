@@ -664,6 +664,7 @@ class DocumentStore:
                 for chunk in section_chunks
             ]
             enriched = dict(section)
+            enriched["chunk_count"] = int(section.get("chunk_count") or len(section_chunks))
             enriched["previews"] = previews
             enriched_sections.append(enriched)
             flat_chunks.extend(

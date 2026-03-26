@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -105,7 +105,7 @@ def build_container(
     recommendation_engine = RecommendationEngine(stock_screener, explanation_builder, quote_service, news_service, news_curator)
     dashboard_api = DashboardAPI(dashboard_service)
     quote_api = QuoteAPI(quote_service)
-    stock_api = StockAPI(quote_service, fundamentals_service, news_service, news_curator)
+    stock_api = StockAPI(quote_service, fundamentals_service, news_service, news_curator, technical_service, settings)
     fund_api = FundAPI(fund_service, fund_screener)
     recommendation_api = RecommendationAPI(recommendation_engine)
     task_router_v2 = TaskRouter(stock_resolver=stock_resolver)
@@ -156,3 +156,4 @@ def build_container(
         task_router_v2=task_router_v2,
         hybrid_answer_engine=hybrid_answer_engine,
     )
+

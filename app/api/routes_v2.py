@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -244,15 +244,18 @@ async def dashboard_overview(request: Request, market: str | None = None) -> dic
 async def market_health(request: Request) -> dict:
     require_current_user(request)
     providers = request.app.state.container.market_registry.all_providers()
-    checks = []
-    for provider in providers:
+    timeout = request.app.state.container.quote_service.settings.market_health_timeout_seconds
+
+    async def check_provider(provider: object) -> dict:
         try:
-            health = await asyncio.wait_for(provider.healthcheck(), timeout=0.35)
+            health = await asyncio.wait_for(provider.healthcheck(), timeout=timeout)
         except Exception as exc:
             health = {"provider": getattr(provider, "provider_name", "unknown"), "ok": False, "latency_ms": None, "error": str(exc)}
         if hasattr(health, "model_dump"):
-            health = health.model_dump()
-        checks.append(health)
+            return health.model_dump()
+        return health
+
+    checks = await asyncio.gather(*(check_provider(provider) for provider in providers))
     return {
         "status": "ok" if any(item["ok"] for item in checks) else "degraded",
         "providers": checks,

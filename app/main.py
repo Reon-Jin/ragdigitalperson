@@ -73,10 +73,16 @@ async def disable_cache_for_finavatar_assets(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup_background_sync() -> None:
+    if not settings.finance_sync_on_startup:
+        app.state.finance_sync_status = {"started": False, "done": True, "error": "disabled"}
+        return
+
     app.state.finance_sync_status = {"started": True, "done": False, "error": None}
 
     async def runner() -> None:
         try:
+            if settings.finance_sync_startup_delay_seconds > 0:
+                await asyncio.sleep(settings.finance_sync_startup_delay_seconds)
             await asyncio.to_thread(finance_sync.backfill)
             app.state.finance_sync_status = {"started": True, "done": True, "error": None}
         except Exception as exc:

@@ -93,7 +93,7 @@ class SectionSummary(BaseModel):
     title: str
     order: int
     summary: str
-    chunk_count: int
+    chunk_count: int = 0
     previews: List[ChunkPreview]
 
 
