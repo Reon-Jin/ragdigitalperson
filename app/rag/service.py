@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -25,8 +26,21 @@ class RAGService:
         self.embedding_service = EmbeddingService(settings)
         self.reranker = RerankerService(settings)
         self.vector_store = VectorStore(settings)
-        self.ingestion_service = IngestionService(settings, self.repository, self.parser, self.chunker, self.embedding_service, self.vector_store)
-        self.search_service = SearchService(settings, self.repository, self.embedding_service, self.reranker, self.vector_store)
+        self.ingestion_service = IngestionService(
+            settings,
+            self.repository,
+            self.parser,
+            self.chunker,
+            self.embedding_service,
+            self.vector_store,
+        )
+        self.search_service = SearchService(
+            settings,
+            self.repository,
+            self.embedding_service,
+            self.reranker,
+            self.vector_store,
+        )
         self.background = BackgroundTaskManager(settings)
 
     def queue_upload(self, *, temp_path: Path, filename: str, user_id: str) -> dict:
@@ -48,7 +62,10 @@ class RAGService:
         )
         job = self.repository.create_job(doc_id=doc["doc_id"], user_id=user_id, filename=filename)
         self.background.submit(job_id=job["job_id"], doc_id=doc["doc_id"])
-        return {"doc": self.repository.get_document(doc["doc_id"], user_id=user_id), "job": self.repository.get_job(job["job_id"], user_id=user_id)}
+        return {
+            "doc": self.repository.get_document(doc["doc_id"], user_id=user_id),
+            "job": self.repository.get_job(job["job_id"], user_id=user_id),
+        }
 
     def resolve_storage_path(self, doc_id: str, suffix: str, user_id: str) -> Path:
         user_dir = self.settings.uploads_dir / user_id
@@ -65,13 +82,18 @@ class RAGService:
         doc = self.repository.get_document(doc_id, user_id=user_id)
         if not doc:
             return None
-        chunks = self.repository.list_chunks(doc_id=doc_id, user_id=user_id)
+
+        chunks = self._dedupe_chunks(self.repository.list_chunks(doc_id=doc_id, user_id=user_id))
         sections: dict[str, list[dict]] = {}
         for chunk in chunks:
             sections.setdefault(chunk["section_title"] or "文档", []).append(chunk)
+
+        section_ids = {title: f"{doc_id}:{index}" for index, title in enumerate(sections.keys())}
+        headings = [title for title in sections.keys() if title and title != "文档"]
+
         doc["sections"] = [
             {
-                "section_id": f"{doc_id}:{index}",
+                "section_id": section_ids[title],
                 "doc_id": doc_id,
                 "title": title,
                 "order": index,
@@ -81,9 +103,9 @@ class RAGService:
                     {
                         "chunk_id": item["chunk_id"],
                         "chunk_index": item["chunk_index"],
-                        "chunk_title": item["section_title"] or f"Chunk {item['chunk_index'] + 1}",
+                        "chunk_title": self._chunk_title(item),
                         "chunk_kind": item["chunk_kind"],
-                        "section_id": f"{doc_id}:{index}",
+                        "section_id": section_ids[title],
                         "section_title": title,
                         "preview": item["preview"],
                         "word_count": item["token_count"],
@@ -95,12 +117,13 @@ class RAGService:
             }
             for index, (title, items) in enumerate(sections.items())
         ]
+
         doc["chunks"] = [
             {
                 "chunk_id": item["chunk_id"],
                 "chunk_index": item["chunk_index"],
-                "chunk_title": item["section_title"] or f"Chunk {item['chunk_index'] + 1}",
-                "section_id": f"{doc_id}:{index}",
+                "chunk_title": self._chunk_title(item),
+                "section_id": section_ids.get(item["section_title"] or "文档", f"{doc_id}:0"),
                 "section_title": item["section_title"],
                 "text": item["text"],
                 "preview": item["preview"],
@@ -111,9 +134,15 @@ class RAGService:
                 "page_start": item["page_start"],
                 "page_end": item["page_end"],
             }
-            for index, item in enumerate(chunks)
+            for item in chunks
         ]
-        doc["pages"] = []
+
+        doc["pages"] = self._build_pages(doc_id, doc["chunks"])
+        doc["chunk_count"] = len(doc["chunks"])
+        doc["section_count"] = len(doc["sections"])
+        doc["headings"] = headings[:20]
+        if doc["chunks"] and not doc.get("summary"):
+            doc["summary"] = doc["chunks"][0]["preview"]
         return doc
 
     def delete_document(self, doc_id: str, user_id: str) -> bool:
@@ -144,6 +173,68 @@ class RAGService:
             }
             for hit in hits
         ]
+
+    def _build_pages(self, doc_id: str, chunks: list[dict]) -> list[dict]:
+        pages: dict[int, dict] = {}
+        for chunk in chunks:
+            page_start = int(chunk.get("page_start") or 0)
+            page_end = int(chunk.get("page_end") or page_start or 0)
+            if page_start <= 0:
+                continue
+            for page_number in range(page_start, max(page_start, page_end) + 1):
+                page = pages.setdefault(
+                    page_number,
+                    {
+                        "doc_id": doc_id,
+                        "page_number": page_number,
+                        "char_start": 0,
+                        "char_end": 0,
+                        "preview": "",
+                        "text": "",
+                        "chunks": [],
+                    },
+                )
+                page["chunks"].append(
+                    {
+                        "chunk_id": chunk["chunk_id"],
+                        "chunk_index": chunk["chunk_index"],
+                        "chunk_title": chunk["chunk_title"],
+                        "chunk_kind": chunk["chunk_kind"],
+                        "section_id": chunk["section_id"],
+                        "section_title": chunk["section_title"],
+                        "preview": chunk["preview"],
+                        "word_count": chunk["word_count"],
+                        "page_start": chunk.get("page_start"),
+                        "page_end": chunk.get("page_end"),
+                    }
+                )
+
+        for page in pages.values():
+            page_text = "\n\n".join(item["preview"] for item in page["chunks"][:8] if item.get("preview"))
+            page["preview"] = page["chunks"][0]["preview"] if page["chunks"] else ""
+            page["text"] = page_text
+            page["char_end"] = len(page_text)
+        return [pages[number] for number in sorted(pages.keys())]
+
+    def _dedupe_chunks(self, chunks: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for item in chunks:
+            signature = " ".join(str(item.get("text", "")).split()).strip().lower()[:220]
+            if not signature or signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(item)
+        return deduped
+
+    def _chunk_title(self, item: dict) -> str:
+        preview = re.sub(r"\s+", " ", str(item.get("preview", "")).strip())
+        if preview:
+            return preview[:30]
+        section_title = str(item.get("section_title", "")).strip()
+        if section_title:
+            return section_title[:30]
+        return f"Chunk {int(item.get('chunk_index', 0)) + 1}"
 
 
 @lru_cache(maxsize=1)

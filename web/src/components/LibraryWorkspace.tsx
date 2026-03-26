@@ -1,7 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+﻿import { useDeferredValue, useEffect, useMemo, useState } from "react";
 
 import { formatTimeLabel } from "../lib/format";
-import type { DocumentDetail, IngestionJob, LibraryFileItem, PageDetail } from "../types";
+import type { ChunkDetail, DocumentDetail, IngestionJob, LibraryFileItem, PageDetail } from "../types";
 
 type LibraryTab = "preview" | "chunks" | "pages";
 
@@ -30,6 +30,32 @@ function previewExcerpt(document: DocumentDetail): string {
   return document.summary || "暂无可预览文本。";
 }
 
+function resolveDocumentJob(jobs: IngestionJob[], docId: string): IngestionJob | null {
+  const related = jobs.filter((item) => item.doc_id === docId);
+  if (!related.length) return null;
+  return related.sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at))[0];
+}
+
+function statusPresentation(item: LibraryFileItem, job: IngestionJob | null): { label: string; className: string } {
+  const status = String(item.status || "").toLowerCase();
+  if (status === "completed") {
+    return { label: "已完成", className: "status-good" };
+  }
+  if (status === "failed") {
+    return { label: "失败 100%", className: "status-warn" };
+  }
+  if (job && ["queued", "running"].includes(job.status)) {
+    const progress = Math.round((job.progress || 0) * 100);
+    return { label: `${job.stage} ${progress}%`, className: "status-loading" };
+  }
+  if (status === "processing" || status === "queued") {
+    const progress = job ? Math.round((job.progress || 0) * 100) : 0;
+    const stage = job?.stage || status;
+    return { label: `${stage} ${progress}%`, className: "status-loading" };
+  }
+  return { label: suffixLabel(item.suffix), className: "status-neutral" };
+}
+
 function PageViewer({ page }: { page: PageDetail | null }) {
   if (!page) {
     return <div className="empty-state">当前资料没有可分页预览的内容。</div>;
@@ -40,7 +66,7 @@ function PageViewer({ page }: { page: PageDetail | null }) {
         <strong>第 {page.page_number} 页</strong>
         <span className="status-pill status-neutral">{page.chunks.length} 个分块命中</span>
       </div>
-      <p className="muted-copy">{page.preview || "暂无页摘要。"}</p>
+      <p className="muted-copy">{page.preview || "暂无页面摘要。"}</p>
       <pre className="library-text-preview">{page.text || "当前页暂无可提取文本。"}</pre>
       <div className="library-chip-stack">
         {page.chunks.length ? (
@@ -53,6 +79,27 @@ function PageViewer({ page }: { page: PageDetail | null }) {
           <span className="status-pill status-neutral">这一页未匹配到分块。</span>
         )}
       </div>
+    </div>
+  );
+}
+
+function ChunkViewer({ chunk }: { chunk: ChunkDetail | null }) {
+  if (!chunk) {
+    return <div className="empty-state">当前资料没有可查看的分块。</div>;
+  }
+  return (
+    <div className="library-active-view">
+      <div className="card-topline">
+        <strong>{chunk.chunk_title}</strong>
+        <span className="status-pill status-neutral">{chunk.word_count} tokens</span>
+      </div>
+      <div className="pill-row compact">
+        <span className="status-pill status-neutral">{chunk.section_title || "未分类"}</span>
+        <span className="status-pill status-neutral">{chunk.chunk_kind}</span>
+        <span className="status-pill status-neutral">{formatPageRange(chunk.page_start, chunk.page_end)}</span>
+      </div>
+      <p className="muted-copy">{chunk.preview || "暂无摘要。"}</p>
+      <pre className="library-text-preview">{chunk.text || "暂无正文。"}</pre>
     </div>
   );
 }
@@ -74,8 +121,16 @@ export function LibraryWorkspace(props: {
   const [activeTab, setActiveTab] = useState<LibraryTab>("preview");
   const [activeChunkId, setActiveChunkId] = useState("");
   const [activePageNumber, setActivePageNumber] = useState(1);
+  const [showAllSections, setShowAllSections] = useState(false);
 
-  const jobsByDocId = useMemo(() => new Map(props.jobs.map((item) => [item.doc_id, item])), [props.jobs]);
+  const jobsByDocId = useMemo(() => {
+    const map = new Map<string, IngestionJob>();
+    props.files.forEach((item) => {
+      const job = resolveDocumentJob(props.jobs, item.doc_id);
+      if (job) map.set(item.doc_id, job);
+    });
+    return map;
+  }, [props.files, props.jobs]);
 
   const filteredFiles = useMemo(() => {
     const keyword = deferredSearch.trim().toLowerCase();
@@ -88,6 +143,7 @@ export function LibraryWorkspace(props: {
 
   useEffect(() => {
     const document = props.selectedDocument;
+    setShowAllSections(false);
     if (!document) {
       setActiveChunkId("");
       setActivePageNumber(1);
@@ -113,13 +169,23 @@ export function LibraryWorkspace(props: {
     return props.selectedDocument.pages.find((item) => item.page_number === activePageNumber) || props.selectedDocument.pages[0] || null;
   }, [activePageNumber, props.selectedDocument]);
 
+  const visibleSections = useMemo(() => {
+    const sections = props.selectedDocument?.sections || [];
+    return showAllSections ? sections : sections.slice(0, 12);
+  }, [props.selectedDocument, showAllSections]);
+
+  const activeJob = props.selectedDocument ? jobsByDocId.get(props.selectedDocument.doc_id) || null : null;
+  const activeStatus = props.selectedDocument
+    ? statusPresentation(props.selectedDocument, activeJob)
+    : { label: "", className: "status-neutral" };
+
   return (
     <section className="panel library-panel">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Knowledge Base Manager</p>
           <h2>资料管理</h2>
-          <p className="muted-copy">集中查看你的私有资料、预览正文、核对分块与清理无效文档。</p>
+          <p className="muted-copy">集中查看你的私有资料，预览正文，核对分块与清理无效文档。</p>
         </div>
         <div className="toolbar-row library-toolbar">
           <label className="field library-search-wrap">
@@ -138,7 +204,8 @@ export function LibraryWorkspace(props: {
             {filteredFiles.length ? (
               filteredFiles.map((item) => {
                 const active = item.doc_id === props.selectedDocumentId;
-                const job = jobsByDocId.get(item.doc_id);
+                const job = jobsByDocId.get(item.doc_id) || null;
+                const pill = statusPresentation(item, job);
                 return (
                   <button
                     className={`list-card selectable library-doc-card ${active ? "active" : ""}`}
@@ -148,7 +215,7 @@ export function LibraryWorkspace(props: {
                   >
                     <div className="card-topline">
                       <strong>{item.title || item.filename}</strong>
-                      <span className="status-pill status-neutral">{job ? `${job.stage} ${Math.round(job.progress * 100)}%` : suffixLabel(item.suffix)}</span>
+                      <span className={`status-pill ${pill.className}`}>{pill.label}</span>
                     </div>
                     <p className="muted-copy">{item.filename}</p>
                     <p>{item.summary || "暂无摘要。"}</p>
@@ -189,14 +256,17 @@ export function LibraryWorkspace(props: {
                     <h3>{props.selectedDocument.title || props.selectedDocument.filename}</h3>
                     <p className="muted-copy">{props.selectedDocument.filename}</p>
                   </div>
-                  <button
-                    className="button ghost library-danger-button"
-                    type="button"
-                    onClick={() => props.onDeleteDocument(props.selectedDocument!.doc_id)}
-                    disabled={props.deletingDocId === props.selectedDocument.doc_id}
-                  >
-                    {props.deletingDocId === props.selectedDocument.doc_id ? "删除中..." : "删除资料"}
-                  </button>
+                  <div className="pill-row compact align-end">
+                    <span className={`status-pill ${activeStatus.className}`}>{activeStatus.label}</span>
+                    <button
+                      className="button ghost library-danger-button"
+                      type="button"
+                      onClick={() => props.onDeleteDocument(props.selectedDocument!.doc_id)}
+                      disabled={props.deletingDocId === props.selectedDocument.doc_id}
+                    >
+                      {props.deletingDocId === props.selectedDocument.doc_id ? "删除中..." : "删除资料"}
+                    </button>
+                  </div>
                 </div>
                 <div className="library-stat-grid">
                   <div className="metric-tile mini">
@@ -236,7 +306,7 @@ export function LibraryWorkspace(props: {
 
               {activeTab === "preview" ? (
                 <div className="library-preview-grid">
-                  <article className="subpanel library-active-view">
+                  <article className="subpanel library-active-view library-summary-panel">
                     <div className="subpanel-head">
                       <h3>资料摘要</h3>
                       <span className="status-pill status-neutral">{props.selectedDocument.chunks.length} 个分块已建索引</span>
@@ -282,10 +352,15 @@ export function LibraryWorkspace(props: {
                   <article className="subpanel full-span">
                     <div className="subpanel-head">
                       <h3>分节摘要</h3>
+                      {props.selectedDocument.sections.length > 12 ? (
+                        <button className="button ghost small" type="button" onClick={() => setShowAllSections((current) => !current)}>
+                          {showAllSections ? "收起" : `展开全部 (${props.selectedDocument.sections.length})`}
+                        </button>
+                      ) : null}
                     </div>
                     <div className="library-section-list">
-                      {props.selectedDocument.sections.length ? (
-                        props.selectedDocument.sections.map((section) => (
+                      {visibleSections.length ? (
+                        visibleSections.map((section) => (
                           <div className="list-card library-section-card" key={section.section_id}>
                             <div className="card-topline">
                               <strong>{section.title}</strong>
@@ -294,7 +369,15 @@ export function LibraryWorkspace(props: {
                             <p>{section.summary || "暂无摘要。"}</p>
                             <div className="library-mini-list">
                               {section.previews.slice(0, 3).map((chunk) => (
-                                <button className="prompt-chip" key={chunk.chunk_id} type="button" onClick={() => { setActiveTab("chunks"); setActiveChunkId(chunk.chunk_id); }}>
+                                <button
+                                  className="prompt-chip"
+                                  key={chunk.chunk_id}
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveTab("chunks");
+                                    setActiveChunkId(chunk.chunk_id);
+                                  }}
+                                >
                                   {chunk.chunk_title}
                                 </button>
                               ))}
@@ -328,7 +411,7 @@ export function LibraryWorkspace(props: {
                             <strong>{chunk.chunk_title}</strong>
                             <span className="status-pill status-neutral">{formatPageRange(chunk.page_start, chunk.page_end)}</span>
                           </div>
-                          <p className="muted-copy">{chunk.section_title}</p>
+                          <p className="muted-copy">{chunk.section_title || "未分类"}</p>
                           <p>{chunk.preview || "暂无预览。"}</p>
                         </button>
                       ))}
@@ -336,23 +419,7 @@ export function LibraryWorkspace(props: {
                   </div>
 
                   <div className="subpanel">
-                    {activeChunk ? (
-                      <div className="library-active-view">
-                        <div className="card-topline">
-                          <strong>{activeChunk.chunk_title}</strong>
-                          <span className="status-pill status-neutral">{activeChunk.word_count} 词</span>
-                        </div>
-                        <div className="pill-row compact">
-                          <span className="status-pill status-neutral">{activeChunk.section_title}</span>
-                          <span className="status-pill status-neutral">{activeChunk.chunk_kind}</span>
-                          <span className="status-pill status-neutral">{formatPageRange(activeChunk.page_start, activeChunk.page_end)}</span>
-                        </div>
-                        <p className="muted-copy">{activeChunk.preview || "暂无摘要。"}</p>
-                        <pre className="library-text-preview">{activeChunk.text}</pre>
-                      </div>
-                    ) : (
-                      <div className="empty-state">当前资料没有可查看的分块。</div>
-                    )}
+                    <ChunkViewer chunk={activeChunk} />
                   </div>
                 </div>
               ) : null}
@@ -377,7 +444,7 @@ export function LibraryWorkspace(props: {
                               <strong>第 {page.page_number} 页</strong>
                               <span className="status-pill status-neutral">{page.chunks.length} 块</span>
                             </div>
-                            <p>{page.preview || "暂无页摘要。"}</p>
+                            <p>{page.preview || "暂无页面摘要。"}</p>
                           </button>
                         ))
                       ) : (

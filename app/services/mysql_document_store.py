@@ -179,36 +179,52 @@ class DocumentStore:
         if categories:
             allowed = set(categories)
             docs = [item for item in docs if item["category"] in allowed]
-        return docs[:limit]
+        scored: dict[str, float] = {item["doc_id"]: 0.0 for item in docs}
+        for query in queries:
+            results = self.rag.search(query, user_id=user_id or "")
+            for index, item in enumerate(results):
+                scored[item["doc_id"]] = max(scored.get(item["doc_id"], 0.0), float(item["score"]) + max(0.0, 0.2 - index * 0.01))
+        ranked = sorted(docs, key=lambda item: scored.get(item["doc_id"], 0.0), reverse=True)
+        return [dict(item, score=round(scored.get(item["doc_id"], 0.0), 4)) for item in ranked[:limit]]
 
     def rank_chunks(self, queries: Sequence[str], *, categories: Sequence[str] | None = None, doc_ids: Sequence[str] | None = None, chunk_ids: Sequence[str] | None = None, user_id: str | None = None, limit: int = 20) -> list[SearchResult]:
-        merged_query = " ".join(query.strip() for query in queries if query.strip())
-        results = self.rag.search(merged_query, user_id=user_id or "", doc_id=(doc_ids or [None])[0])
-        hits = [
-            SearchResult(
-                doc_id=item["doc_id"],
-                filename=item["filename"],
-                category=item["category"],
-                title=item["title"],
-                section_id=item["section_id"],
-                section_title=item["section_title"],
-                chunk_id=item["chunk_id"],
-                chunk_index=item["chunk_index"],
-                chunk_title=item["chunk_title"],
-                page_start=item.get("page_start"),
-                page_end=item.get("page_end"),
-                chunk_kind=item["chunk_kind"],
-                score=item["score"],
-                text=item["text"],
-            )
-            for item in results
-        ]
+        aggregated: dict[str, SearchResult] = {}
+        target_doc_ids = list(doc_ids or [])
+        for query in queries:
+            doc_scope = target_doc_ids if target_doc_ids else [None]
+            for scoped_doc_id in doc_scope:
+                results = self.rag.search(query, user_id=user_id or "", doc_id=scoped_doc_id)
+                for item in results:
+                    existing = aggregated.get(item["chunk_id"])
+                    candidate = SearchResult(
+                        doc_id=item["doc_id"],
+                        filename=item["filename"],
+                        category=item["category"],
+                        title=item["title"],
+                        section_id=item["section_id"],
+                        section_title=item["section_title"],
+                        chunk_id=item["chunk_id"],
+                        chunk_index=item["chunk_index"],
+                        chunk_title=item["chunk_title"],
+                        page_start=item.get("page_start"),
+                        page_end=item.get("page_end"),
+                        chunk_kind=item["chunk_kind"],
+                        score=item["score"],
+                        text=item["text"],
+                    )
+                    if existing is None or candidate.score > existing.score:
+                        aggregated[candidate.chunk_id] = candidate
+        hits = list(aggregated.values())
         if chunk_ids:
             allowed = set(chunk_ids)
             hits = [item for item in hits if item.chunk_id in allowed]
         if categories:
             allowed = set(categories)
             hits = [item for item in hits if item.category in allowed]
+        if doc_ids:
+            allowed_doc_ids = set(doc_ids)
+            hits = [item for item in hits if item.doc_id in allowed_doc_ids]
+        hits.sort(key=lambda item: item.score, reverse=True)
         return hits[:limit]
 
     def hierarchical_search(self, queries: Sequence[str], *, categories: Sequence[str] | None = None, doc_ids: Sequence[str] | None = None, chunk_ids: Sequence[str] | None = None, user_id: str | None = None) -> tuple[list[SearchResult], list[dict[str, Any]]]:

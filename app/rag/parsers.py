@@ -19,7 +19,8 @@ class DocumentParser:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def parse(self, doc_id: str, file_path: Path, filename: str, source_type: str = "upload") -> ExtractedDocument:
+    def parse(self, doc_id: str, file_path: str | Path, filename: str, source_type: str = "upload") -> ExtractedDocument:
+        file_path = Path(file_path)
         suffix = file_path.suffix.lower()
         if suffix == ".pdf":
             pages = self._parse_pdf(file_path)

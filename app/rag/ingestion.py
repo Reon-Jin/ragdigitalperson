@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 from qdrant_client.http import models as rest
 
@@ -34,9 +35,16 @@ class IngestionService:
             self.repository.update_job(job_id, status="running", stage="extracting", progress=0.05, message="正在提取文档内容")
             self.repository.update_document_status(doc_id, status="processing")
 
-            extracted = self.parser.parse(doc_id, file_path=doc["stored_path"], filename=doc["filename"], source_type=doc.get("source_type", "upload"))
+            extracted = self.parser.parse(
+                doc_id,
+                file_path=Path(str(doc["stored_path"])),
+                filename=doc["filename"],
+                source_type=doc.get("source_type", "upload"),
+            )
             self.repository.update_job(job_id, status="running", stage="chunking", progress=0.35, message="正在切分文档")
             chunks = self.chunker.chunk(extracted)
+            if not chunks:
+                raise RuntimeError("文档抽取后没有可用文本，无法生成分块。")
             headings = list(dict.fromkeys(chunk.section_title for chunk in chunks if chunk.section_title))[:24]
             summary = chunks[0].preview if chunks else ""
             self.repository.replace_chunks(doc_id=doc_id, user_id=doc["user_id"], chunks=chunks)
