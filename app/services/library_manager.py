@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 from app.services.deepseek_client import ModelProvider
-from app.services.document_store import DocumentStore, SUPPORTED_SUFFIXES
+from app.services.mysql_document_store import DocumentStore, SUPPORTED_SUFFIXES
 from app.services.metadata_service import MetadataService
 
 
@@ -15,7 +15,7 @@ class LibraryManager:
         self.document_store = document_store
         self.metadata_service = metadata_service
 
-    async def add_files(self, file_paths: Sequence[Path], *, model_provider: ModelProvider) -> dict[str, list]:
+    async def add_files(self, file_paths: Sequence[Path], *, model_provider: ModelProvider, user_id: str) -> dict[str, list]:
         prepared_documents = []
         skipped: list[str] = []
 
@@ -28,8 +28,7 @@ class LibraryManager:
                 continue
 
             doc_id = str(uuid.uuid4())
-            stored_name = f"{doc_id}{suffix}"
-            destination = self.document_store.settings.uploads_dir / stored_name
+            destination = self.document_store.resolve_storage_path(doc_id, suffix, user_id)
             shutil.move(str(temp_path), destination)
 
             try:
@@ -51,7 +50,10 @@ class LibraryManager:
                 chunks=prepared["chunks"],
                 model_provider=model_provider,
             )
-            prepared_documents.append(self.document_store.apply_metadata(prepared, enriched))
+            enriched_prepared = self.document_store.apply_metadata(prepared, enriched)
+            enriched_prepared["doc"]["user_id"] = user_id
+            enriched_prepared["doc"]["stored_path"] = str(destination)
+            prepared_documents.append(enriched_prepared)
 
         added = self.document_store.save_prepared_documents(prepared_documents)
         return {"added": added, "skipped": skipped}

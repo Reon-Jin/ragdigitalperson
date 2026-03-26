@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 CategoryName = Literal["金融", "医学", "法律", "科技", "生活"]
 EmotionName = Literal["neutral", "happy", "serious", "concerned", "energetic", "thinking"]
-ModelProviderName = Literal["deepseek", "qwen"]
+ModelProviderName = Literal["deepseek", "qwen", "mimo", "ollama"]
 
 
 class ChatRequest(BaseModel):
@@ -78,10 +78,13 @@ class ChunkPreview(BaseModel):
     chunk_id: str
     chunk_index: int
     chunk_title: str
+    chunk_kind: str = "text"
     section_id: str
     section_title: str
     preview: str
     word_count: int
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class SectionSummary(BaseModel):
@@ -108,6 +111,7 @@ class DocumentDetail(BaseModel):
     headings: List[str]
     sections: List[SectionSummary]
     chunks: List["ChunkDetail"]
+    pages: List["PageDetail"] = Field(default_factory=list)
 
 
 class ChunkDetail(BaseModel):
@@ -118,9 +122,22 @@ class ChunkDetail(BaseModel):
     section_title: str
     text: str
     preview: str
+    chunk_kind: str = "text"
     word_count: int
     char_start: int
     char_end: int
+    page_start: int | None = None
+    page_end: int | None = None
+
+
+class PageDetail(BaseModel):
+    doc_id: str
+    page_number: int
+    char_start: int
+    char_end: int
+    preview: str
+    text: str = ""
+    chunks: List[ChunkPreview] = Field(default_factory=list)
 
 
 class SectionDetail(BaseModel):
@@ -135,10 +152,13 @@ class SectionDetail(BaseModel):
 class LibraryCatalogChunk(BaseModel):
     chunk_id: str
     chunk_title: str
+    chunk_kind: str = "text"
     section_id: str
     section_title: str
     chunk_index: int
     preview: str
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class LibraryCatalogItem(BaseModel):

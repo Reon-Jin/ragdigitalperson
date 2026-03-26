@@ -42,6 +42,9 @@ class SearchResult:
     chunk_id: str
     chunk_index: int
     chunk_title: str
+    page_start: int | None
+    page_end: int | None
+    chunk_kind: str
     score: float
     text: str
 
@@ -52,10 +55,12 @@ class DocumentStore:
         self.docs_path = self.settings.data_dir / "documents.json"
         self.sections_path = self.settings.data_dir / "sections.json"
         self.chunks_path = self.settings.data_dir / "chunks.json"
+        self.pages_path = self.settings.data_dir / "pages.json"
 
         self.docs: List[Dict[str, Any]] = self._load_json(self.docs_path, [])
         self.sections: List[Dict[str, Any]] = self._load_json(self.sections_path, [])
         self.chunks: List[Dict[str, Any]] = self._load_json(self.chunks_path, [])
+        self.pages: List[Dict[str, Any]] = self._load_json(self.pages_path, [])
 
         self.doc_vectorizer = self._make_vectorizer()
         self.section_vectorizer = self._make_vectorizer()
@@ -94,7 +99,7 @@ class DocumentStore:
             return False
         doc_keys = {"title", "summary", "section_count", "headings", "category", "keywords"}
         chunk_keys = {"chunk_id", "section_id", "section_title", "char_start", "char_end", "word_count", "chunk_title"}
-        if not self.sections:
+        if not self.sections or not self.pages:
             return True
         return any(not doc_keys.issubset(set(doc.keys())) for doc in self.docs) or any(
             not chunk_keys.issubset(set(chunk.keys())) for chunk in self.chunks
@@ -105,6 +110,7 @@ class DocumentStore:
         self.docs = []
         self.sections = []
         self.chunks = []
+        self.pages = []
 
         for doc in legacy_docs:
             suffix = doc.get("suffix", "")
@@ -125,6 +131,10 @@ class DocumentStore:
         self.docs_by_id = {item["doc_id"]: item for item in self.docs}
         self.sections_by_id = {item["section_id"]: item for item in self.sections}
         self.chunks_by_id = {item["chunk_id"]: item for item in self.chunks}
+        self.pages_by_doc_id = {
+            doc_id: sorted([page for page in self.pages if page["doc_id"] == doc_id], key=lambda item: item.get("page_number", 0))
+            for doc_id in self.docs_by_id
+        }
         self.doc_index_by_id = {item["doc_id"]: index for index, item in enumerate(self.docs)}
         self.section_index_by_id = {item["section_id"]: index for index, item in enumerate(self.sections)}
         self.chunk_index_by_id = {item["chunk_id"]: index for index, item in enumerate(self.chunks)}
@@ -133,24 +143,64 @@ class DocumentStore:
         self._save_json(self.docs_path, self.docs)
         self._save_json(self.sections_path, self.sections)
         self._save_json(self.chunks_path, self.chunks)
+        self._save_json(self.pages_path, self.pages)
 
     def _finalize_mutation(self) -> None:
         self._persist()
         self._refresh_maps()
         self._rebuild_index()
 
-    def _read_text(self, file_path: Path) -> str:
+    def _read_document_payload(self, file_path: Path) -> Dict[str, Any]:
         suffix = file_path.suffix.lower()
         if suffix in {".txt", ".md"}:
-            return file_path.read_text(encoding="utf-8", errors="ignore")
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            return {"text": text, "pages": [{"page_number": 1, "text": text}]}
         if suffix == ".pdf":
             reader = PdfReader(str(file_path))
-            pages = [page.extract_text() or "" for page in reader.pages]
-            return "\n".join(pages)
+            pages = [{"page_number": index + 1, "text": page.extract_text() or ""} for index, page in enumerate(reader.pages)]
+            return {"text": "\n\n".join(page["text"] for page in pages), "pages": pages}
         if suffix == ".docx":
             document = Document(str(file_path))
-            return "\n".join(paragraph.text for paragraph in document.paragraphs)
+            text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+            return {"text": text, "pages": [{"page_number": 1, "text": text}]}
         raise ValueError(f"Unsupported file type: {suffix}")
+
+    def _build_page_records(self, doc_id: str, page_payloads: Sequence[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        cursor = 0
+        normalized_pages = [self._normalize_text(str(item.get("text", ""))) for item in page_payloads]
+        usable_pages = [item for item in normalized_pages if item]
+
+        if not usable_pages:
+            usable_pages = [text]
+
+        for index, page_text in enumerate(usable_pages):
+            char_start = cursor
+            char_end = char_start + len(page_text)
+            records.append(
+                {
+                    "doc_id": doc_id,
+                    "page_number": index + 1,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                    "preview": self._local_summary(page_text, 180),
+                    "text": page_text,
+                }
+            )
+            cursor = char_end + 2
+        return records
+
+    def _resolve_chunk_pages(self, char_start: int, char_end: int, page_records: Sequence[Dict[str, Any]]) -> tuple[int | None, int | None]:
+        overlaps: List[int] = []
+        for page in page_records:
+            page_start = int(page.get("char_start", 0))
+            page_end = int(page.get("char_end", 0))
+            if char_end < page_start or char_start > page_end:
+                continue
+            overlaps.append(int(page.get("page_number", 0)))
+        if not overlaps:
+            return (page_records[0]["page_number"], page_records[0]["page_number"]) if page_records else (None, None)
+        return overlaps[0], overlaps[-1]
 
     def _normalize_text(self, text: str) -> str:
         text = text.replace("\r", "\n").replace("\xa0", " ")
@@ -215,6 +265,32 @@ class DocumentStore:
         cleaned = re.sub(r"\s+", " ", text).strip()
         return re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
 
+    def _sanitize_table_block(self, text: str) -> str:
+        rows = []
+        for raw_line in text.splitlines():
+            line = re.sub(r"\s{2,}", " | ", raw_line.strip())
+            line = re.sub(r"\t+", " | ", line)
+            line = re.sub(r"\s+\|\s+", " | ", line)
+            if line:
+                rows.append(line)
+        return "\n".join(rows).strip()
+
+    def _is_table_like_block(self, text: str) -> bool:
+        if "\t" in text or "|" in text:
+            return True
+        if len(re.findall(r"\d+(?:\.\d+)?%?", text)) >= 3 and "  " in text:
+            return True
+        if len(re.findall(r"(?:\S+\s{2,}\S+)", text)) >= 2:
+            return True
+        return False
+
+    def _looks_like_table_line(self, line: str) -> bool:
+        if "\t" in line or "|" in line:
+            return True
+        if len(re.findall(r"\d+(?:\.\d+)?%?", line)) >= 2 and "  " in line:
+            return True
+        return False
+
     def _valid_block(self, text: str) -> bool:
         cleaned = self._sanitize_block(text)
         if len(cleaned) < 24:
@@ -240,7 +316,8 @@ class DocumentStore:
             nonlocal current
             if not current:
                 return
-            block = self._sanitize_block(" ".join(current))
+            separator = "\n" if any(self._looks_like_table_line(item) for item in current) else " "
+            block = self._sanitize_block(separator.join(current))
             if self._valid_block(block):
                 blocks.append(block)
             current = []
@@ -257,6 +334,10 @@ class DocumentStore:
             if self._is_heading(line):
                 flush_current()
                 blocks.append(f"## {line}")
+                continue
+
+            if self._looks_like_table_line(line):
+                current.append(line)
                 continue
 
             current.append(line)
@@ -354,6 +435,7 @@ class DocumentStore:
                 section_title=title,
                 paragraphs=filtered_paragraphs,
                 start_position=current_position,
+                page_records=self.pages_by_doc_id.get(doc_id, []),
             )
             if not section_chunks:
                 return
@@ -402,6 +484,7 @@ class DocumentStore:
         section_title: str,
         paragraphs: Sequence[str],
         start_position: int,
+        page_records: Sequence[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         chunks: List[Dict[str, Any]] = []
         bucket: List[str] = []
@@ -409,11 +492,15 @@ class DocumentStore:
         cursor = start_position
 
         def finalize_chunk(text: str, char_start: int) -> None:
-            cleaned_text = self._sanitize_block(text)
-            if not self._valid_block(cleaned_text):
+            chunk_kind = "table" if self._is_table_like_block(text) else "text"
+            cleaned_text = self._sanitize_table_block(text) if chunk_kind == "table" else self._sanitize_block(text)
+            if chunk_kind == "text" and not self._valid_block(cleaned_text):
+                return
+            if chunk_kind == "table" and len(cleaned_text) < 16:
                 return
             chunk_index = len(chunks)
             char_end = char_start + len(cleaned_text)
+            page_start, page_end = self._resolve_chunk_pages(char_start, char_end, page_records)
             chunks.append(
                 {
                     "chunk_id": str(uuid.uuid4()),
@@ -422,10 +509,13 @@ class DocumentStore:
                     "section_title": section_title,
                     "chunk_index": chunk_index,
                     "chunk_title": self._default_chunk_title(cleaned_text, chunk_index),
+                    "chunk_kind": chunk_kind,
                     "text": cleaned_text,
                     "preview": self._local_summary(cleaned_text, 160),
                     "char_start": char_start,
                     "char_end": char_end,
+                    "page_start": page_start,
+                    "page_end": page_end,
                     "word_count": len(re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]", cleaned_text)),
                 }
             )
@@ -477,7 +567,7 @@ class DocumentStore:
         doc = self.docs_by_id.get(chunk["doc_id"], {})
         return (
             f"{doc.get('category', '')}\n{doc.get('title', '')}\n{section.get('title', '')}\n"
-            f"{chunk.get('chunk_title', '')}\n{chunk.get('text', '')}"
+            f"{chunk.get('chunk_kind', 'text')}\n{chunk.get('chunk_title', '')}\n{chunk.get('text', '')}"
         )
 
     def _rebuild_index(self) -> None:
@@ -493,8 +583,17 @@ class DocumentStore:
             else None
         )
 
-    def list_files(self) -> List[Dict[str, Any]]:
-        return sorted(self.docs, key=lambda item: item.get("uploaded_at", ""), reverse=True)
+    def _doc_visible(self, doc: Dict[str, Any], user_id: str | None) -> bool:
+        if user_id is None:
+            return True
+        return doc.get("user_id") == user_id
+
+    def list_files(self, user_id: str | None = None) -> List[Dict[str, Any]]:
+        return sorted(
+            [doc for doc in self.docs if self._doc_visible(doc, user_id)],
+            key=lambda item: item.get("uploaded_at", ""),
+            reverse=True,
+        )
 
     def _sorted_sections_for_doc(self, doc_id: str) -> List[Dict[str, Any]]:
         sections = [section for section in self.sections if section["doc_id"] == doc_id]
@@ -508,17 +607,20 @@ class DocumentStore:
         chunks = [chunk for chunk in self.chunks if chunk["doc_id"] == doc_id]
         return sorted(chunks, key=sort_key)
 
-    def get_catalog(self) -> List[Dict[str, Any]]:
+    def get_catalog(self, user_id: str | None = None) -> List[Dict[str, Any]]:
         catalog: List[Dict[str, Any]] = []
-        for doc in self.list_files():
+        for doc in self.list_files(user_id=user_id):
             chunks = [
                 {
                     "chunk_id": chunk["chunk_id"],
                     "chunk_title": chunk["chunk_title"],
+                    "chunk_kind": chunk.get("chunk_kind", "text"),
                     "section_id": chunk["section_id"],
                     "section_title": chunk["section_title"],
                     "chunk_index": chunk["chunk_index"],
                     "preview": chunk["preview"],
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
                 }
                 for chunk in self._sorted_chunks_for_doc(doc["doc_id"])
             ]
@@ -535,9 +637,9 @@ class DocumentStore:
             )
         return catalog
 
-    def get_document(self, doc_id: str) -> Dict[str, Any] | None:
+    def get_document(self, doc_id: str, user_id: str | None = None) -> Dict[str, Any] | None:
         doc = self.docs_by_id.get(doc_id)
-        if not doc:
+        if not doc or not self._doc_visible(doc, user_id):
             return None
 
         sections = self._sorted_sections_for_doc(doc_id)
@@ -551,10 +653,13 @@ class DocumentStore:
                     "chunk_id": chunk["chunk_id"],
                     "chunk_index": chunk["chunk_index"],
                     "chunk_title": chunk["chunk_title"],
+                    "chunk_kind": chunk.get("chunk_kind", "text"),
                     "section_id": chunk["section_id"],
                     "section_title": chunk["section_title"],
                     "preview": chunk["preview"],
                     "word_count": chunk["word_count"],
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
                 }
                 for chunk in section_chunks
             ]
@@ -567,6 +672,9 @@ class DocumentStore:
                     "text": chunk["text"],
                     "char_start": chunk["char_start"],
                     "char_end": chunk["char_end"],
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                    "chunk_kind": chunk.get("chunk_kind", "text"),
                 }
                 for preview, chunk in zip(previews, section_chunks)
             )
@@ -574,11 +682,13 @@ class DocumentStore:
         detail = dict(doc)
         detail["sections"] = enriched_sections
         detail["chunks"] = flat_chunks
+        detail["pages"] = self.pages_by_doc_id.get(doc_id, [])
         return detail
 
-    def get_section(self, doc_id: str, section_id: str) -> Dict[str, Any] | None:
+    def get_section(self, doc_id: str, section_id: str, user_id: str | None = None) -> Dict[str, Any] | None:
         section = self.sections_by_id.get(section_id)
-        if not section or section["doc_id"] != doc_id:
+        doc = self.docs_by_id.get(doc_id)
+        if not section or section["doc_id"] != doc_id or not doc or not self._doc_visible(doc, user_id):
             return None
 
         chunks = [chunk for chunk in self.chunks if chunk["section_id"] == section_id and chunk["doc_id"] == doc_id]
@@ -586,16 +696,60 @@ class DocumentStore:
         detail["chunks"] = sorted(chunks, key=lambda item: item["chunk_index"])
         return detail
 
+    def get_page(self, doc_id: str, page_number: int, user_id: str | None = None) -> Dict[str, Any] | None:
+        doc = self.docs_by_id.get(doc_id)
+        if not doc or not self._doc_visible(doc, user_id):
+            return None
+        page = next((item for item in self.pages_by_doc_id.get(doc_id, []) if item["page_number"] == page_number), None)
+        if not page:
+            return None
+
+        page_chunks = [
+            chunk
+            for chunk in self._sorted_chunks_for_doc(doc_id)
+            if (chunk.get("page_start") or 0) <= page_number <= (chunk.get("page_end") or chunk.get("page_start") or 0)
+        ]
+        return {
+            "doc_id": doc_id,
+            "page_number": page["page_number"],
+            "char_start": page.get("char_start", 0),
+            "char_end": page.get("char_end", 0),
+            "preview": page.get("preview", ""),
+            "text": page.get("text", ""),
+            "chunks": [
+                {
+                    "chunk_id": chunk["chunk_id"],
+                    "chunk_index": chunk["chunk_index"],
+                    "chunk_title": chunk["chunk_title"],
+                    "chunk_kind": chunk.get("chunk_kind", "text"),
+                    "section_id": chunk["section_id"],
+                    "section_title": chunk["section_title"],
+                    "preview": chunk["preview"],
+                    "word_count": chunk["word_count"],
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                }
+                for chunk in page_chunks
+            ],
+        }
+
     def prepare_document(self, stored_path: Path, original_name: str, preserve_doc_id: str | None = None) -> Dict[str, Any] | None:
-        text = self._read_text(stored_path)
+        payload = self._read_document_payload(stored_path)
+        text = payload["text"]
         if not text.strip():
             return None
 
-        cleaned_text = self._normalize_text(text)
+        doc_id = preserve_doc_id or str(uuid.uuid4())
+        normalized_pages = [self._normalize_text(str(item.get("text", ""))) for item in payload.get("pages", [])]
+        normalized_pages = [item for item in normalized_pages if item]
+        page_records = self._build_page_records(doc_id, payload.get("pages", []), self._normalize_text(text))
+        cleaned_text = "\n\n".join(normalized_pages)
+        cleaned_text = cleaned_text.strip() or self._normalize_text(text)
         if not cleaned_text:
             return None
 
-        doc_id = preserve_doc_id or str(uuid.uuid4())
+        self.pages_by_doc_id = getattr(self, "pages_by_doc_id", {})
+        self.pages_by_doc_id[doc_id] = page_records
         sections, chunks, title, headings = self._build_sections(cleaned_text, doc_id, original_name)
         if not chunks:
             return None
@@ -612,6 +766,7 @@ class DocumentStore:
             "uploaded_at": uploaded_at,
             "chunk_count": len(chunks),
             "section_count": len(sections),
+            "page_count": len(page_records),
             "summary": self._local_summary(combined_preview or cleaned_text),
             "headings": headings[:20],
             "keywords": self._extract_keywords(cleaned_text, headings),
@@ -621,6 +776,7 @@ class DocumentStore:
             "doc": doc_record,
             "sections": sections,
             "chunks": chunks,
+            "pages": page_records,
             "text_excerpt": cleaned_text[: self.settings.metadata_excerpt_chars],
         }
 
@@ -670,10 +826,12 @@ class DocumentStore:
         self.docs = [doc for doc in self.docs if doc["doc_id"] != doc_id]
         self.sections = [section for section in self.sections if section["doc_id"] != doc_id]
         self.chunks = [chunk for chunk in self.chunks if chunk["doc_id"] != doc_id]
+        self.pages = [page for page in self.pages if page["doc_id"] != doc_id]
 
         self.docs.append(prepared["doc"])
         self.sections.extend(prepared["sections"])
         self.chunks.extend(prepared["chunks"])
+        self.pages.extend(prepared.get("pages", []))
 
     def update_document_title(self, doc_id: str, title: str) -> Dict[str, Any] | None:
         doc = self.docs_by_id.get(doc_id)
@@ -704,9 +862,9 @@ class DocumentStore:
             "word_count": updated["word_count"],
         }
 
-    def delete_document(self, doc_id: str) -> bool:
+    def delete_document(self, doc_id: str, user_id: str | None = None) -> bool:
         doc = self.docs_by_id.get(doc_id)
-        if not doc:
+        if not doc or not self._doc_visible(doc, user_id):
             return False
         suffix = doc.get("suffix", "")
         stored_path = self.settings.uploads_dir / f"{doc_id}{suffix}"
@@ -714,6 +872,7 @@ class DocumentStore:
         self.docs = [item for item in self.docs if item["doc_id"] != doc_id]
         self.sections = [item for item in self.sections if item["doc_id"] != doc_id]
         self.chunks = [item for item in self.chunks if item["doc_id"] != doc_id]
+        self.pages = [item for item in self.pages if item["doc_id"] != doc_id]
         self._finalize_mutation()
         return True
 
@@ -721,6 +880,7 @@ class DocumentStore:
         self.docs = []
         self.sections = []
         self.chunks = []
+        self.pages = []
         if self.settings.uploads_dir.exists():
             for path in self.settings.uploads_dir.iterdir():
                 if path.is_file():
@@ -811,9 +971,10 @@ class DocumentStore:
         queries: Sequence[str],
         *,
         categories: Sequence[str] | None = None,
+        user_id: str | None = None,
         limit: int = 12,
     ) -> List[Dict[str, Any]]:
-        candidates = [doc for doc in self.docs if not categories or doc["category"] in categories]
+        candidates = [doc for doc in self.docs if self._doc_visible(doc, user_id) and (not categories or doc["category"] in categories)]
         matrix = self._subset_matrix(self.doc_matrix, [self.doc_index_by_id[doc["doc_id"]] for doc in candidates])
         scores = self._score_candidates(queries, candidates, self.doc_vectorizer, matrix, "doc_id")
         ranked = sorted(candidates, key=lambda item: scores.get(item["doc_id"], 0.0), reverse=True)
@@ -826,6 +987,7 @@ class DocumentStore:
         categories: Sequence[str] | None = None,
         doc_ids: Sequence[str] | None = None,
         chunk_ids: Sequence[str] | None = None,
+        user_id: str | None = None,
         limit: int = 20,
     ) -> List[SearchResult]:
         allowed_doc_ids = set(doc_ids or [])
@@ -835,6 +997,8 @@ class DocumentStore:
         candidates = []
         for chunk in self.chunks:
             doc = self.docs_by_id.get(chunk["doc_id"], {})
+            if not self._doc_visible(doc, user_id):
+                continue
             if category_set and doc.get("category") not in category_set:
                 continue
             if allowed_doc_ids and chunk["doc_id"] not in allowed_doc_ids:
@@ -867,15 +1031,20 @@ class DocumentStore:
                     chunk_id=chunk["chunk_id"],
                     chunk_index=chunk["chunk_index"],
                     chunk_title=chunk.get("chunk_title", f"分段 {chunk['chunk_index'] + 1}"),
+                    page_start=chunk.get("page_start"),
+                    page_end=chunk.get("page_end"),
+                    chunk_kind=chunk.get("chunk_kind", "text"),
                     score=score,
                     text=chunk["text"],
                 )
             )
         return results
 
-    def categories_summary(self) -> List[Dict[str, Any]]:
+    def categories_summary(self, user_id: str | None = None) -> List[Dict[str, Any]]:
         summary: Dict[str, int] = {}
         for doc in self.docs:
+            if not self._doc_visible(doc, user_id):
+                continue
             summary[doc["category"]] = summary.get(doc["category"], 0) + 1
         return [{"category": key, "count": summary[key]} for key in self.settings.allowed_categories if key in summary]
 
@@ -886,10 +1055,11 @@ class DocumentStore:
         categories: Sequence[str] | None = None,
         doc_ids: Sequence[str] | None = None,
         chunk_ids: Sequence[str] | None = None,
+        user_id: str | None = None,
     ) -> tuple[List[SearchResult], List[Dict[str, Any]]]:
         traces: List[Dict[str, Any]] = []
 
-        selected_categories = list(categories) if categories else [item["category"] for item in self.categories_summary()]
+        selected_categories = list(categories) if categories else [item["category"] for item in self.categories_summary(user_id=user_id)]
         for category in selected_categories:
             if category:
                 traces.append(
@@ -902,12 +1072,12 @@ class DocumentStore:
                     }
                 )
 
-        docs = self.rank_documents(queries, categories=categories, limit=max(self.settings.max_doc_candidates, 8))
+        docs = self.rank_documents(queries, categories=categories, user_id=user_id, limit=max(self.settings.max_doc_candidates, 8))
         if doc_ids:
             doc_set = set(doc_ids)
             docs = [doc for doc in docs if doc["doc_id"] in doc_set]
             if not docs:
-                docs = [doc for doc in self.list_files() if doc["doc_id"] in doc_set]
+                docs = [doc for doc in self.list_files(user_id=user_id) if doc["doc_id"] in doc_set]
 
         docs = docs[: self.settings.max_doc_candidates]
         for doc in docs:
@@ -926,6 +1096,7 @@ class DocumentStore:
             categories=categories,
             doc_ids=[doc["doc_id"] for doc in docs] if docs else doc_ids,
             chunk_ids=chunk_ids,
+            user_id=user_id,
             limit=self.settings.max_chunk_candidates,
         )
 
@@ -982,6 +1153,9 @@ class DocumentStore:
                     chunk_id=chunk["chunk_id"],
                     chunk_index=chunk["chunk_index"],
                     chunk_title=chunk.get("chunk_title", f"分段 {chunk['chunk_index'] + 1}"),
+                    page_start=chunk.get("page_start"),
+                    page_end=chunk.get("page_end"),
+                    chunk_kind=chunk.get("chunk_kind", "text"),
                     score=1.0,
                     text=chunk["text"],
                 )
