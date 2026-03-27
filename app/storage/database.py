@@ -332,6 +332,7 @@ class Database:
                 stored_path VARCHAR(512) NOT NULL,
                 category VARCHAR(64) NOT NULL,
                 title VARCHAR(255) NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
                 suffix VARCHAR(20) NOT NULL,
                 uploaded_at VARCHAR(40) NOT NULL,
                 status VARCHAR(32) NOT NULL DEFAULT 'queued',
@@ -473,6 +474,7 @@ class Database:
         self.ensure_column("documents", "status", "VARCHAR(32) NOT NULL DEFAULT 'queued'")
         self.ensure_column("documents", "source_type", "VARCHAR(32) NOT NULL DEFAULT 'upload'")
         self.ensure_column("documents", "file_size", "BIGINT NOT NULL DEFAULT 0")
+        self.ensure_column("documents", "is_active", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_index("idx_user_sessions_user", "user_sessions", "user_id")
         self._ensure_index("idx_documents_user", "documents", "user_id")
         self._ensure_index("idx_documents_status", "documents", "status")

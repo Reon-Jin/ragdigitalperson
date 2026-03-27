@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   AgentMemory,
   AnalysisMode,
   AuthResponse,
@@ -96,6 +96,8 @@ export function createApi(getToken: () => string, onUnauthorized: () => void) {
     files: (): Promise<LibraryFileItem[]> => request<LibraryFileItem[]>("/documents"),
     getLibraryDocument: (docId: string): Promise<DocumentDetail> =>
       request<DocumentDetail>(`/documents/${encodeURIComponent(docId)}`),
+    updateLibraryDocument: (docId: string, payload: { title?: string; is_active?: boolean }): Promise<DocumentDetail> =>
+      request<DocumentDetail>(`/documents/${encodeURIComponent(docId)}`, { method: "PATCH", body: JSON.stringify(payload) }),
     deleteLibraryDocument: (docId: string): Promise<{ deleted: boolean; doc_id: string }> =>
       request<{ deleted: boolean; doc_id: string }>(`/documents/${encodeURIComponent(docId)}`, { method: "DELETE" }),
     upload: (body: FormData): Promise<UploadResponse> => request<UploadResponse>("/files/upload", { method: "POST", body }),

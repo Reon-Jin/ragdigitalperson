@@ -1,4 +1,4 @@
-﻿export type TaskType = "dashboard" | "auto" | "library";
+export type TaskType = "dashboard" | "analysis" | "auto" | "library";
 export type DeskSource = "hybrid" | "market" | "knowledge";
 export type AnalysisMode = "summary" | "professional" | "teaching";
 export type ModelProvider = "deepseek" | "qwen" | "mimo" | "ollama";
@@ -179,6 +179,7 @@ export interface LibraryFileItem {
   summary: string;
   keywords: string[];
   status: string;
+  is_active: boolean;
 }
 
 export interface UploadQueuedItem {

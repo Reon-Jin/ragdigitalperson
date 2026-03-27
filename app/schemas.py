@@ -68,6 +68,7 @@ class FileItem(BaseModel):
     summary: str
     keywords: List[str] = Field(default_factory=list)
     status: str = "queued"
+    is_active: bool = True
 
 
 class UploadResponse(BaseModel):
@@ -140,6 +141,7 @@ class DocumentDetail(BaseModel):
     summary: str
     keywords: List[str] = Field(default_factory=list)
     status: str = "queued"
+    is_active: bool = True
     headings: List[str]
     sections: List[SectionSummary]
     chunks: List["ChunkDetail"]
@@ -200,11 +202,13 @@ class LibraryCatalogItem(BaseModel):
     title: str
     summary: str
     keywords: List[str] = Field(default_factory=list)
+    is_active: bool = True
     chunks: List[LibraryCatalogChunk]
 
 
 class UpdateDocumentRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    is_active: bool | None = None
 
 
 class UpdateChunkRequest(BaseModel):

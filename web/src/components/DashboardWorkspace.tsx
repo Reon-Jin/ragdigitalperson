@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 
 import { formatTimeLabel, num, pct, splitTags, toneClass, turnover } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
@@ -71,6 +71,7 @@ interface DashboardWorkspaceProps {
   onUploadFiles: (files: FileList | File[]) => void;
   onLogout: () => void;
   onGoLibrary: () => void;
+  onGoAnalysis: () => void;
   onGoDesk: () => void;
   onOpenSession: (conversationId: string) => void;
   onRefreshCoreData: () => void;
@@ -107,6 +108,8 @@ export function DashboardWorkspace(props: DashboardWorkspaceProps) {
             activeKey="overview"
             onSaveProfile={props.onSaveProfile}
             onBackToDesk={props.onGoDesk}
+            onGoLibrary={props.onGoLibrary}
+            onGoAnalysis={props.onGoAnalysis}
             onOpenSessions={() => setSessionOpen(true)}
             onLogout={props.onLogout}
             onProfileChange={props.onProfileChange}
@@ -265,50 +268,7 @@ export function DashboardWorkspace(props: DashboardWorkspaceProps) {
                     </section>
                   </section>
 
-                  <section className="rounded-[24px] border border-white/8 bg-[#0f1620]/88 p-5">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Conversation</p>
-                        <h3 className="mt-2 text-lg font-semibold text-slate-50">{props.conversationTitle}</h3>
-                      </div>
-                      <div className="flex gap-2">
-                        <button type="button" onClick={props.onCreateConversation} className="rounded-xl border border-white/10 bg-white/4 px-3 py-2 text-xs text-slate-200 hover:bg-white/8">新会话</button>
-                        <button type="button" onClick={props.onRemoveConversation} className="rounded-xl border border-white/10 bg-white/4 px-3 py-2 text-xs text-slate-200 hover:bg-white/8">删除</button>
-                      </div>
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {props.quickPrompts.map((prompt) => (
-                        <button key={prompt} type="button" onClick={() => props.onSubmitMessage(prompt)} className="rounded-xl border border-white/8 bg-white/[0.03] px-3 py-2 text-sm text-slate-300 hover:border-emerald-400/30 hover:bg-emerald-400/[0.06]">
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="mt-4 max-h-[420px] space-y-3 overflow-auto pr-1">
-                      {props.messages.length ? props.messages.map((message) => (
-                        <article key={message.message_id} className={`rounded-2xl border p-4 ${message.role === "assistant" ? "border-emerald-400/12 bg-emerald-400/[0.04]" : "border-white/8 bg-white/[0.03]"}`}>
-                          <div className="mb-2 flex items-center justify-between gap-3 text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                            <span>{message.role === "user" ? "User" : "FinAvatar"}</span>
-                            <span>{formatTimeLabel(message.created_at)}</span>
-                          </div>
-                          <div className="prose prose-invert max-w-none text-sm leading-7 text-slate-300" dangerouslySetInnerHTML={markdownBlock(message.content || (message.role === "assistant" ? "正在生成..." : ""))} />
-                        </article>
-                      )) : <div className="rounded-2xl border border-dashed border-white/12 bg-white/[0.02] p-4 text-sm text-slate-500">从这里开始新的投研对话，系统会保留上下文并实时流式输出。</div>}
-                    </div>
-                    <div className="mt-4 grid gap-3">
-                      <textarea
-                        value={props.draft}
-                        onChange={(event) => props.onDraftChange(event.target.value)}
-                        className="min-h-[120px] w-full rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-600"
-                        placeholder="例如：围绕当前关注标的，给我一份偏专业风格的买卖观察和风险提示。"
-                      />
-                      <div className="flex justify-end gap-2">
-                        <button type="button" onClick={props.onAbortStream} disabled={!props.streaming} className="rounded-xl border border-white/10 bg-white/4 px-3 py-2 text-sm text-slate-200 hover:bg-white/8 disabled:opacity-50">停止</button>
-                        <button type="button" onClick={() => props.onSubmitMessage()} disabled={props.streaming} className="rounded-xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-400/14 disabled:opacity-50">{props.streaming ? "分析中..." : "发送分析"}</button>
-                      </div>
-                    </div>
-                  </section>
                 </div>
-
                 <aside className="space-y-5">
                   <section className="rounded-[24px] border border-white/8 bg-[#0f1620]/88 p-5">
                     <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Control Center</p>

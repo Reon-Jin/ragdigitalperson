@@ -66,6 +66,7 @@ class DocumentStore:
                 "summary": item.get("summary") or "",
                 "keywords": item.get("keywords") or [],
                 "status": item.get("status") or "queued",
+                "is_active": bool(item.get("is_active", True)),
             }
             for item in files
         ]
@@ -83,6 +84,7 @@ class DocumentStore:
                         "title": item["title"],
                         "summary": item["summary"],
                         "keywords": item["keywords"],
+                        "is_active": item["is_active"],
                         "chunks": [
                             {
                                 "chunk_id": chunk["chunk_id"],
@@ -151,10 +153,21 @@ class DocumentStore:
         self._refresh_state()
         return deleted
 
-    def update_document_title(self, doc_id: str, title: str) -> dict[str, Any] | None:
-        self.db.execute("UPDATE documents SET title = %(title)s WHERE doc_id = %(doc_id)s", {"title": title, "doc_id": doc_id})
+    def update_document(self, doc_id: str, *, title: str | None = None, is_active: bool | None = None, user_id: str | None = None) -> dict[str, Any] | None:
+        current = self.get_document(doc_id, user_id=user_id)
+        if not current:
+            return None
+        payload = {
+            "doc_id": doc_id,
+            "title": title if title is not None else current["title"],
+            "is_active": 1 if (current["is_active"] if is_active is None else is_active) else 0,
+        }
+        self.db.execute(
+            "UPDATE documents SET title = %(title)s, is_active = %(is_active)s WHERE doc_id = %(doc_id)s",
+            payload,
+        )
         self._refresh_state()
-        return self.get_document(doc_id)
+        return self.get_document(doc_id, user_id=user_id)
 
     def update_chunk_title(self, doc_id: str, chunk_id: str, chunk_title: str) -> dict[str, Any] | None:
         self.db.execute("UPDATE chunk_metadata SET section_title = %(section_title)s WHERE chunk_id = %(chunk_id)s AND doc_id = %(doc_id)s", {"section_title": chunk_title, "chunk_id": chunk_id, "doc_id": doc_id})
@@ -175,7 +188,7 @@ class DocumentStore:
         return None
 
     def rank_documents(self, queries: Sequence[str], *, categories: Sequence[str] | None = None, user_id: str | None = None, limit: int = 12) -> list[dict[str, Any]]:
-        docs = self.list_files(user_id=user_id)
+        docs = [item for item in self.list_files(user_id=user_id) if item.get("is_active", True)]
         if categories:
             allowed = set(categories)
             docs = [item for item in docs if item["category"] in allowed]

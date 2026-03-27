@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 import re
 from collections import Counter
@@ -25,7 +23,7 @@ class SearchService:
 
     def search(self, query: str, *, user_id: str | None = None, doc_id: str | None = None, top_k: int | None = None) -> list[SearchHit]:
         limit = top_k or self.settings.retrieval_top_k
-        documents = {item["doc_id"]: item for item in self.repository.list_documents(user_id=user_id)}
+        documents = {item["doc_id"]: item for item in self.repository.list_documents(user_id=user_id, active_only=True)}
         try:
             vector_hits = self._vector_search(query, documents=documents, user_id=user_id, doc_id=doc_id, limit=limit)
         except Exception:
@@ -39,6 +37,8 @@ class SearchService:
         return ranked[: self.settings.answer_top_k]
 
     def _vector_search(self, query: str, *, documents: dict[str, dict], user_id: str | None, doc_id: str | None, limit: int) -> list[SearchHit]:
+        if doc_id and doc_id not in documents:
+            return []
         query_vector = self.embedding_service.encode_query(query)
         filter_payload = {}
         if user_id:
@@ -49,25 +49,27 @@ class SearchService:
         chunk_ids = [str(item.id) for item in raw_hits]
         chunk_map = self.repository.get_chunk_map(chunk_ids)
         scores = {str(item.id): float(item.score or 0.0) for item in raw_hits}
-        rows = [chunk_map[chunk_id] for chunk_id in chunk_ids if chunk_id in chunk_map]
+        rows = [chunk_map[chunk_id] for chunk_id in chunk_ids if chunk_id in chunk_map and chunk_map[chunk_id]["doc_id"] in documents]
         return self.repository.build_search_hits(rows, scores, documents)
 
     def _lexical_search(self, query: str, *, documents: dict[str, dict], user_id: str | None, doc_id: str | None, limit: int) -> list[SearchHit]:
+        if doc_id and doc_id not in documents:
+            return []
         rows = self.repository.list_chunks(doc_id=doc_id, user_id=user_id)
         query_counter = Counter(self._tokenize(query))
         if not query_counter:
             return []
+        normalized_query = re.sub(r"\s+", "", query.lower())
         scores: dict[str, float] = {}
         selected_rows: list[dict] = []
         for row in rows:
-            text = "\n".join(
-                [
-                    str(documents.get(row["doc_id"], {}).get("title", "")),
-                    str(row.get("section_title", "")),
-                    str(row.get("text", "")),
-                ]
-            )
+            doc = documents.get(row["doc_id"])
+            if not doc:
+                continue
+            title = str(doc.get("title", ""))
+            text = "\n".join([title, title, str(row.get("section_title", "")), str(row.get("text", ""))])
             score = self._lexical_score(query_counter, Counter(self._tokenize(text)))
+            score += self._title_boost(query_counter, normalized_query, title)
             if score <= 0:
                 continue
             scores[row["chunk_id"]] = score
@@ -92,6 +94,18 @@ class SearchService:
 
     def _tokenize(self, text: str) -> list[str]:
         return [item.lower() for item in TOKEN_PATTERN.findall(text or "") if item.strip()]
+
+    def _title_boost(self, query_counter: Counter[str], normalized_query: str, title: str) -> float:
+        normalized_title = re.sub(r"\s+", "", (title or "").lower())
+        if not normalized_title:
+            return 0.0
+        score = self._lexical_score(query_counter, Counter(self._tokenize(title))) * 1.2
+        if normalized_query and normalized_title:
+            if normalized_title in normalized_query:
+                score += 1.5
+            elif normalized_query in normalized_title:
+                score += 0.9
+        return score
 
     def _lexical_score(self, query_counter: Counter[str], doc_counter: Counter[str]) -> float:
         overlap = 0.0

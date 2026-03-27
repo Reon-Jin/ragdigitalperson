@@ -1,5 +1,6 @@
-﻿import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AnalysisWorkspace } from "./components/AnalysisWorkspace";
 import { DashboardWorkspace } from "./components/DashboardWorkspace";
 import { LibraryWorkspace } from "./components/LibraryWorkspace";
 import { createApi } from "./lib/api";
@@ -36,7 +37,6 @@ import type {
   UserProfile,
 } from "./types";
 
-type ThemeMode = "dark" | "light";
 
 const MAX_HISTORY = 8;
 const STATUS_LIMIT = 6;
@@ -53,11 +53,6 @@ const SOURCE_LABELS: Record<DeskSource, string> = {
   hybrid: "Hybrid Intelligence",
   market: "Market Tape",
   knowledge: "Research Vault",
-};
-const MODE_LABELS: Record<AnalysisMode, string> = {
-  professional: "Professional",
-  summary: "Summary",
-  teaching: "Teaching",
 };
 const EMPTY_PROFILE: UserProfile = {
   profile_id: "default",
@@ -106,9 +101,6 @@ function pushStatusLine(current: string[], incoming: string): string[] {
   return next.slice(-STATUS_LIMIT);
 }
 
-function markdownBlock(text: string) {
-  return { __html: renderMarkdown(text) };
-}
 
 function computeFallbackBullets(
   security: SecurityPayload | null,
@@ -162,70 +154,11 @@ function initialsOf(value: string): string {
   return compact.slice(0, 2).toUpperCase();
 }
 
-function MarkdownBlock({ text }: { text: string }) {
-  return <div className="markdown-block" dangerouslySetInnerHTML={markdownBlock(text)} />;
-}
 
-function SkeletonBlock({ className = "" }: { className?: string }) {
-  return <div className={`skeleton-block ${className}`.trim()} aria-hidden="true" />;
-}
 
-function InsightMetric(props: { label: string; value: string; note?: string; tone?: string }) {
-  return (
-    <article className="insight-metric">
-      <span>{props.label}</span>
-      <strong className={props.tone || ""}>{props.value}</strong>
-      <small>{props.note || " "}</small>
-    </article>
-  );
-}
 
-function ProgressMeter(props: { label: string; value: number; note: string; tone?: "risk" | "positive" | "neutral" }) {
-  const width = `${clamp(props.value)}%`;
-  return (
-    <div className="progress-meter">
-      <div className="progress-meter-head">
-        <span>{props.label}</span>
-        <strong>{Math.round(clamp(props.value))}</strong>
-      </div>
-      <div className="progress-track">
-        <div className={`progress-fill ${props.tone || "neutral"}`} style={{ width }} />
-      </div>
-      <small>{props.note}</small>
-    </div>
-  );
-}
 
-function TagCluster(props: { title: string; items: string[]; emptyLabel?: string }) {
-  return (
-    <div className="tag-cluster">
-      <div className="cluster-head">
-        <span>{props.title}</span>
-      </div>
-      <div className="tag-grid">
-        {props.items.length ? (
-          props.items.map((item) => (
-            <span className="tv-tag" key={`${props.title}-${item}`}>
-              {item}
-            </span>
-          ))
-        ) : (
-          <span className="tv-tag muted">{props.emptyLabel || "暂无"}</span>
-        )}
-      </div>
-    </div>
-  );
-}
 
-function StatusBadge(props: { state: "idle" | "loading" | "warn" }) {
-  const label = props.state === "loading" ? "Analyzing" : props.state === "warn" ? "Attention" : "Online";
-  return (
-    <span className={`status-badge ${props.state}`}>
-      <i />
-      {label}
-    </span>
-  );
-}
 
 function AuthScreen(props: {
   mode: "login" | "register";
@@ -287,7 +220,6 @@ function AuthScreen(props: {
 }
 
 export default function App() {
-  const [theme] = useState<ThemeMode>("dark");
   const [token, setToken] = useState<string>(() => window.localStorage.getItem(TOKEN_KEY) || "");
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -333,13 +265,11 @@ export default function App() {
   const [avatarVoiceEnabled, setAvatarVoiceEnabled] = useState<boolean>(() => window.localStorage.getItem(AVATAR_VOICE_KEY) === "1");
   const [avatarProfile, setAvatarProfile] = useState<LocalAvatarProfile | null>(null);
   const [lastAssistantMessage, setLastAssistantMessage] = useState("");
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
   const tokenRef = useRef(token);
   const answerRef = useRef("");
   const assistantMessageIdRef = useRef("");
-  const messageStreamRef = useRef<HTMLDivElement | null>(null);
   const lastSpokenRef = useRef("");
 
   const appendStatus = useCallback((text: string) => {
@@ -579,37 +509,6 @@ export default function App() {
     }
   }, [api, modelProvider, pollIngestionJobs, refreshLibrary, setAgent]);
 
-  const uploadFiles = useCallback(async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const input = form.querySelector('input[type="file"]') as HTMLInputElement | null;
-    if (!input?.files?.length) return;
-
-    const body = new FormData();
-    Array.from(input.files).forEach((file) => body.append("files", file));
-    body.append("model_provider", modelProvider || "deepseek");
-
-    setAgent("loading", "Queueing Research", "Upload accepted and queued for background ingestion.");
-    try {
-      const result = await api.upload(body);
-      input.value = "";
-      const jobIds = result.items.map((item) => item.job_id);
-      if (result.items.length) {
-        setTask("library");
-        await refreshLibrary();
-        void pollIngestionJobs(jobIds);
-      }
-      const memorySnapshot = await api.memory();
-      setMemory(memorySnapshot);
-      if (!result.items.length && result.skipped.length) {
-        setAgent("warn", "Upload Skipped", `Skipped: ${result.skipped.join(" / ")}`);
-      } else {
-        setAgent("loading", "Ingestion Running", `Queued ${result.items.length} file(s) for background ingestion.`);
-      }
-    } catch (error) {
-      setAgent("warn", "Upload Failed", error instanceof Error ? error.message : "Upload failed.");
-    }
-  }, [uploadLibraryFiles]);
 
   const saveProfile = useCallback(async () => {
     try {
@@ -779,6 +678,23 @@ export default function App() {
     await initConversations();
   }, [activeConversationId, api, initConversations]);
 
+  const updateLibraryDocument = useCallback(async (docId: string, patch: { title?: string; is_active?: boolean }): Promise<DocumentDetail> => {
+    try {
+      const saved = await api.updateLibraryDocument(docId, patch);
+      setLibraryFiles((current) => current.map((item) => (item.doc_id === docId ? { ...item, ...saved } : item)));
+      setSelectedLibraryDoc((current) => (current?.doc_id === docId ? saved : current));
+      if (patch.title !== undefined) {
+        setAgent("idle", "Document Renamed", `Updated to ${saved.title}`);
+      } else if (patch.is_active !== undefined) {
+        setAgent("idle", saved.is_active ? "Retrieval Enabled" : "Retrieval Disabled", saved.is_active ? `${saved.title} is now included in RAG retrieval.` : `${saved.title} is now excluded from RAG retrieval.`);
+      }
+      return saved;
+    } catch (error) {
+      setAgent("warn", "Document Update Failed", error instanceof Error ? error.message : "Failed to update document.");
+      throw error;
+    }
+  }, [api, setAgent]);
+
   const deleteLibraryDocument = useCallback(async (docId: string) => {
     if (!docId) return;
     const current = libraryFiles.find((item) => item.doc_id === docId);
@@ -809,9 +725,6 @@ export default function App() {
     resetInsightPanels();
   }, [api, handleUnauthorized, resetInsightPanels, token]);
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
 
   useEffect(() => {
     window.localStorage.setItem(AVATAR_VOICE_KEY, avatarVoiceEnabled ? "1" : "0");
@@ -835,11 +748,6 @@ export default function App() {
     };
   }, [avatarProfile?.default_language, avatarProfile?.voice_name, avatarVoiceEnabled, lastAssistantMessage]);
 
-  useEffect(() => {
-    const viewport = messageStreamRef.current;
-    if (!viewport) return;
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" });
-  }, [messages, streaming]);
 
   useEffect(() => {
     if (task !== "library" || libraryDetailBusy) return;
@@ -1026,14 +934,62 @@ export default function App() {
         onSearchChange={setLibrarySearch}
         onSelectDocument={(docId) => { void loadLibraryDocument(docId); }}
         onRefresh={() => { void refreshLibrary(); }}
+        onUpdateDocument={(docId, patch) => updateLibraryDocument(docId, patch)}
         onDeleteDocument={(docId) => { void deleteLibraryDocument(docId); }}
         onUploadFiles={(files) => { void uploadLibraryFiles(files); }}
         onSaveProfile={() => { void saveProfile(); }}
         onProfileChange={(patch) => setProfile((current) => ({ ...current, ...patch }))}
         onOpenSession={(conversationId) => { void loadConversation(conversationId); }}
-        onAskQuestion={(prompt) => { setTask("dashboard"); void submitMessage(prompt); }}
+        onAskQuestion={(prompt) => { setTask("analysis"); void submitMessage(prompt); }}
+        onGoAnalysis={() => setTask("analysis")}
         onBackToDesk={() => setTask("dashboard")}
         onLogout={() => { void logout(); }}
+      />
+    );
+  }
+
+  if (task === "analysis") {
+    return (
+      <AnalysisWorkspace
+        profile={profile}
+        models={models}
+        modelProvider={modelProvider}
+        analysisMode={analysisMode}
+        deskSource={deskSource}
+        controlHint={controlHint}
+        conversationTitle={conversationTitle}
+        messages={messages}
+        draft={draft}
+        streaming={streaming}
+        quickPrompts={QUICK_PROMPTS}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        memorySummary={memory.summary}
+        memoryTags={historyTags}
+        health={health}
+        okProviders={okProviders}
+        statusItems={statusItems}
+        userDisplayName={avatarProfile?.display_name || user.display_name || user.username}
+        avatarVoiceEnabled={avatarVoiceEnabled}
+        uploadQueuedCount={ingestionJobs.filter((item) => !["completed", "failed"].includes(item.status)).length}
+        onProfileChange={(patch) => setProfile((current) => ({ ...current, ...patch }))}
+        onSaveProfile={() => { void saveProfile(); }}
+        onUploadFiles={(files) => { void uploadLibraryFiles(files); }}
+        onLogout={() => { void logout(); }}
+        onGoLibrary={() => setTask("library")}
+        onGoAnalysis={() => setTask("analysis")}
+        onGoDesk={() => setTask("dashboard")}
+        onOpenSession={(conversationId) => { void loadConversation(conversationId); }}
+        onRefreshCoreData={() => { void refreshCoreData(); }}
+        onDraftChange={setDraft}
+        onSubmitMessage={(prompt) => { void submitMessage(prompt); }}
+        onCreateConversation={() => { void createConversation(); }}
+        onRemoveConversation={() => { void removeConversation(); }}
+        onAbortStream={() => controllerRef.current?.abort()}
+        onToggleVoice={() => setAvatarVoiceEnabled((current) => !current)}
+        onModelProviderChange={setModelProvider}
+        onAnalysisModeChange={setAnalysisMode}
+        onDeskSourceChange={setDeskSource}
       />
     );
   }
@@ -1087,6 +1043,7 @@ export default function App() {
       onUploadFiles={(files) => { void uploadLibraryFiles(files); }}
       onLogout={() => { void logout(); }}
       onGoLibrary={() => setTask("library")}
+      onGoAnalysis={() => setTask("analysis")}
       onGoDesk={() => setTask("dashboard")}
       onOpenSession={(conversationId) => { void loadConversation(conversationId); }}
       onRefreshCoreData={() => { void refreshCoreData(); }}

@@ -26,6 +26,7 @@ class RAGRepository:
             "stored_path": stored_path,
             "category": "未分类",
             "title": Path(filename).stem,
+            "is_active": 1,
             "suffix": suffix,
             "uploaded_at": now,
             "status": "queued",
@@ -42,11 +43,11 @@ class RAGRepository:
         self.db.execute(
             """
             INSERT INTO documents (
-                doc_id, user_id, filename, stored_path, category, title, suffix, uploaded_at, status,
+                doc_id, user_id, filename, stored_path, category, title, is_active, suffix, uploaded_at, status,
                 source_type, file_size, chunk_count, section_count, page_count, summary, headings_json,
                 keywords_json, embedding_json
             ) VALUES (
-                %(doc_id)s, %(user_id)s, %(filename)s, %(stored_path)s, %(category)s, %(title)s, %(suffix)s,
+                %(doc_id)s, %(user_id)s, %(filename)s, %(stored_path)s, %(category)s, %(title)s, %(is_active)s, %(suffix)s,
                 %(uploaded_at)s, %(status)s, %(source_type)s, %(file_size)s, %(chunk_count)s, %(section_count)s,
                 %(page_count)s, %(summary)s, %(headings_json)s, %(keywords_json)s, %(embedding_json)s
             )
@@ -181,23 +182,28 @@ class RAGRepository:
             return None
         return row
 
+    def _normalize_document_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["headings"] = json.loads(row.get("headings_json") or "[]")
+        row["keywords"] = json.loads(row.get("keywords_json") or "[]")
+        row["is_active"] = bool(int(row.get("is_active") or 0))
+        return row
+
     def get_document(self, doc_id: str, user_id: str | None = None) -> dict[str, Any] | None:
         row = self.db.fetchone("SELECT * FROM documents WHERE doc_id = %(doc_id)s", {"doc_id": doc_id})
         if not row or (user_id and row["user_id"] != user_id):
             return None
-        row["headings"] = json.loads(row.get("headings_json") or "[]")
-        row["keywords"] = json.loads(row.get("keywords_json") or "[]")
-        return row
+        return self._normalize_document_row(row)
 
-    def list_documents(self, user_id: str | None = None) -> list[dict[str, Any]]:
+    def list_documents(self, user_id: str | None = None, *, active_only: bool = False) -> list[dict[str, Any]]:
         rows = self.db.fetchall("SELECT * FROM documents ORDER BY uploaded_at DESC")
         documents = []
         for row in rows:
             if user_id and row["user_id"] != user_id:
                 continue
-            row["headings"] = json.loads(row.get("headings_json") or "[]")
-            row["keywords"] = json.loads(row.get("keywords_json") or "[]")
-            documents.append(row)
+            normalized = self._normalize_document_row(row)
+            if active_only and not normalized["is_active"]:
+                continue
+            documents.append(normalized)
         return documents
 
     def list_chunks(self, *, doc_id: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:

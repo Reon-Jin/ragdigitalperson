@@ -184,16 +184,33 @@ async def get_document_page(doc_id: str, page_number: int, request: Request) -> 
     return PageDetail(**page)
 
 
-@app.patch("/api/library/{doc_id}", response_model=DocumentDetail)
-async def update_document(doc_id: str, payload: UpdateDocumentRequest, request: Request) -> DocumentDetail:
-    user = require_current_user(request)
-    existing = document_store.get_document(doc_id, user_id=user.user_id)
+def _apply_document_update(doc_id: str, payload: UpdateDocumentRequest, user_id: str) -> DocumentDetail:
+    existing = document_store.get_document(doc_id, user_id=user_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Document not found.")
-    document = document_store.update_document_title(doc_id, payload.title)
+
+    title = payload.title.strip() if isinstance(payload.title, str) else None
+    if title == "":
+        raise HTTPException(status_code=400, detail="Document title cannot be empty.")
+    if title is None and payload.is_active is None:
+        raise HTTPException(status_code=400, detail="No document changes supplied.")
+
+    document = document_store.update_document(doc_id, title=title, is_active=payload.is_active, user_id=user_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
     return DocumentDetail(**document)
+
+
+@app.patch("/api/library/{doc_id}", response_model=DocumentDetail)
+async def update_document(doc_id: str, payload: UpdateDocumentRequest, request: Request) -> DocumentDetail:
+    user = require_current_user(request)
+    return _apply_document_update(doc_id, payload, user.user_id)
+
+
+@app.patch("/documents/{doc_id}", response_model=DocumentDetail)
+async def update_document_v2(doc_id: str, payload: UpdateDocumentRequest, request: Request) -> DocumentDetail:
+    user = require_current_user(request)
+    return _apply_document_update(doc_id, payload, user.user_id)
 
 
 @app.patch("/api/library/{doc_id}/chunks/{chunk_id}")

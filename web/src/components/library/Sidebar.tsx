@@ -15,6 +15,8 @@ interface SidebarProps {
   activeKey: string;
   onSaveProfile: () => void;
   onBackToDesk: () => void;
+  onGoLibrary: () => void;
+  onGoAnalysis: () => void;
   onOpenSessions: () => void;
   onLogout: () => void;
   onProfileChange: (patch: Partial<UserProfile>) => void;
@@ -39,7 +41,16 @@ export function Sidebar(props: SidebarProps) {
       <nav className="space-y-1">
         {NAV_ITEMS.map((item) => {
           const active = props.activeKey === item.key;
-          const handler = item.key === "overview" ? props.onBackToDesk : item.key === "history" ? props.onOpenSessions : undefined;
+          const handler =
+            item.key === "overview"
+              ? props.onBackToDesk
+              : item.key === "library"
+                ? props.onGoLibrary
+                : item.key === "analysis"
+                  ? props.onGoAnalysis
+                  : item.key === "history"
+                    ? props.onOpenSessions
+                    : undefined;
           return (
             <button
               key={item.key}
